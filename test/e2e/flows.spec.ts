@@ -301,7 +301,7 @@ test("300 participants can poll at the planned rate while the host draws", async
         inFlight++;
         pending.push(
           fetch(
-            `http://127.0.0.1:3100/api/rooms/${event.id}${revisions[client] ? `?revision=${revisions[client]}` : ""}`,
+            `http://127.0.0.1:3100/api/rooms/${event.id}?view=card${revisions[client] ? `&revision=${revisions[client]}` : ""}`,
             {
               headers: { "X-Player-Key": keys[client] },
               signal: AbortSignal.timeout(5000),
@@ -311,6 +311,7 @@ test("300 participants can poll at the planned rate while the host draws", async
               if (response.status === 200) {
                 const view = await response.json();
                 expect(view.me.name).toBe(`Guest ${client}`);
+                expect(view.winners).toEqual([]);
                 revisions[client] = view.revision;
               } else if (response.status !== 204) failures++;
               timings.push(performance.now() - begin);

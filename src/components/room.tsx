@@ -88,7 +88,7 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
             }
           : {};
         const next = await api<RoomView | null>(
-          `/api/rooms/${id}${revision ? `?revision=${revision}` : ""}`,
+          `/api/rooms/${id}?${new URLSearchParams({ ...(revision ? {revision:String(revision)} : {}), ...(role === "player" ? {view:"card"} : {}) })}`,
           { headers, signal: current.signal },
         );
         if (stopped) return;

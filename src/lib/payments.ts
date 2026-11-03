@@ -2,7 +2,7 @@ import Stripe from "stripe";
 import { randomUUID } from "node:crypto";
 import { EVENT_PRICE } from "./game";
 import { AppError } from "./errors";
-import { authorizeHost } from "./service";
+import { authorizeHost, invalidateRoom } from "./service";
 import { writeTransaction } from "./db";
 
 type Sessions = Pick<Stripe["checkout"]["sessions"], "create" | "retrieve">;
@@ -200,6 +200,7 @@ export async function checkout(
         args: [id],
       });
     });
+    invalidateRoom(id);
     return url.href;
   }
   throw new AppError(
@@ -265,6 +266,7 @@ export async function fulfillSession(session: PaymentSession) {
         args: [Math.max(Number(room.expires_at), now + 30 * 86400000), roomId],
       });
   });
+  invalidateRoom(roomId);
   return true;
 }
 export async function failedSession(
@@ -292,4 +294,5 @@ export async function failedSession(
         args: [session.metadata!.roomId!],
       });
   });
+  invalidateRoom(session.metadata.roomId);
 }
