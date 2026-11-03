@@ -88,3 +88,15 @@ export const api = <T>(
   );
 export const apiBlob = (url: string, init: RequestInit = {}) =>
   request(url, init, (response) => response.blob(), 12000);
+
+// Notify other tabs of a change without transmitting cards, messages or credentials.
+export function notifyRoom(id: string) {
+  if (typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(`bingo-room-${id}`);
+  channel.postMessage("refresh");
+  channel.close();
+}
+
+export function imageSource(roomId: string, key: string) {
+  return `/api/rooms/${roomId}/images/${key}`;
+}

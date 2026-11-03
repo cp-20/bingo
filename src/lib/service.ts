@@ -1,5 +1,7 @@
 import {
   createHash,
+  createHmac,
+  randomInt,
   randomBytes,
   randomUUID,
   timingSafeEqual,
@@ -20,11 +22,14 @@ import {
   type Prize,
   type Room,
   type RoomView,
+  type Receipt,
 } from "./game";
 
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const token = () => randomBytes(32).toString("base64url");
+export const crewSecret = (id: string, host: string) =>
+  createHmac("sha256", host).update(`bingo-crew:${id}`).digest("base64url");
 export function validRoomId(id: string) {
   if (!/^[A-Z2-9]{8}$/.test(id))
     throw new AppError("イベントが見つかりません。", 404);
@@ -42,9 +47,13 @@ function roomFrom(row: Row): Room {
     expiresAt: Number(row.expires_at),
     revision: Number(row.revision),
     gameNumber: Number(row.game_number),
+    stage: JSON.parse(String(row.stage || "null")),
+    featuredPrizeId: row.featured_prize_id
+      ? String(row.featured_prize_id)
+      : null,
   };
 }
-async function readRoom(
+export async function readRoom(
   store: { execute: Transaction["execute"] },
   id: string,
 ) {
@@ -61,7 +70,7 @@ function checkedRoom(row: Row | undefined) {
     throw new AppError("このイベントの利用期間は終了しました。", 410);
   return row;
 }
-function checkHost(row: Row, secret: string | null) {
+export function checkHost(row: Row, secret: string | null) {
   if (
     !secret ||
     secret.length !== 43 ||
@@ -149,8 +158,19 @@ export async function createRoom(
       args: [key, now + 3600000],
     });
     await tx.execute({
-      sql: "INSERT INTO rooms(id,host_hash,title,created_at,expires_at) VALUES(?,?,?,?,?)",
-      args: [id, hash(secret), name, now, now + 7 * 86400000],
+      sql: "INSERT INTO rooms(id,host_hash,title,created_at,expires_at,crew_hash) VALUES(?,?,?,?,?,?)",
+      args: [
+        id,
+        hash(secret),
+        name,
+        now,
+        now + 7 * 86400000,
+        hash(crewSecret(id, secret)),
+      ],
+    });
+    await tx.execute({
+      sql: "INSERT INTO room_live(room_id) VALUES(?)",
+      args: [id],
     });
   });
   invalidateRoom(id);
@@ -221,15 +241,38 @@ export async function joinRoom(
 }
 
 // The cache contains private server data. Only getView's explicit projection may leave the server.
-type Member = { id: string; name: string; auth_hash: string; bingo_at: number | null; card: string };
-type Snapshot = { row: Row; room: Room; members: Member[]; players: Player[]; winners: Player[]; byAuth: Map<string, number> };
-type CachedRoom = { snapshot?: Snapshot; freshUntil: number; pending?: Promise<Snapshot> };
+type Member = {
+  id: string;
+  name: string;
+  auth_hash: string;
+  bingo_at: number | null;
+  card: string;
+};
+type Snapshot = {
+  row: Row;
+  room: Room;
+  members: Member[];
+  players: Player[];
+  winners: Player[];
+  reachCount: number;
+  receipts: Receipt[];
+  byAuth: Map<string, number>;
+};
+type CachedRoom = {
+  snapshot?: Snapshot;
+  freshUntil: number;
+  pending?: Promise<Snapshot>;
+};
 const roomCache = new Map<string, CachedRoom>();
 
 export function invalidateRoom(id: string) {
   roomCache.delete(id);
 }
-async function roomSnapshot(store: Awaited<ReturnType<typeof db>>, id: string, knownRevision?: number): Promise<Snapshot> {
+async function roomSnapshot(
+  store: Awaited<ReturnType<typeof db>>,
+  id: string,
+  knownRevision?: number,
+): Promise<Snapshot> {
   let entry = roomCache.get(id);
   if (!entry) {
     entry = { freshUntil: 0 };
@@ -239,10 +282,18 @@ async function roomSnapshot(store: Awaited<ReturnType<typeof db>>, id: string, k
     roomCache.delete(id);
     roomCache.set(id, entry);
   }
-  if (entry.snapshot && entry.freshUntil > Date.now() && entry.snapshot.room.expiresAt > Date.now()
-    && (knownRevision === undefined || entry.snapshot.room.revision >= knownRevision)) return entry.snapshot;
+  if (
+    entry.snapshot &&
+    entry.freshUntil > Date.now() &&
+    entry.snapshot.room.expiresAt > Date.now() &&
+    (knownRevision === undefined ||
+      entry.snapshot.room.revision >= knownRevision)
+  )
+    return entry.snapshot;
   if (entry.pending) return entry.pending;
-  const current = entry, previous = entry.snapshot, started = Date.now();
+  const current = entry,
+    previous = entry.snapshot,
+    started = Date.now();
   current.pending = (async () => {
     // A single SQL statement keeps numbers, ranking and membership in one consistent snapshot.
     const result = await store.execute({
@@ -250,23 +301,51 @@ async function roomSnapshot(store: Awaited<ReturnType<typeof db>>, id: string, k
         SELECT json_group_array(json_object('id',id,'name',name,'auth_hash',auth_hash,'bingo_at',bingo_at,'card',card))
         FROM (SELECT id,name,auth_hash,bingo_at,card FROM players WHERE room_id=rooms.id
           ORDER BY bingo_at IS NULL,bingo_at,joined_at,id)
-      ) END AS members FROM rooms WHERE id=?`,
-      args: [previous?.room.revision ?? null, id],
+       ) END AS members, CASE WHEN revision=? THEN NULL ELSE (
+        SELECT json_group_array(json_object('id',id,'prizeId',prize_id,'prizeName',prize_name,'imageKey',image_key,'playerId',player_id,'playerName',player_name,'gameNumber',game_number,'claimCode',claim_code,'deliveredAt',delivered_at)) FROM awards WHERE room_id=rooms.id AND cancelled_at IS NULL
+      ) END AS receipts FROM rooms WHERE id=?`,
+      args: [
+        previous?.room.revision ?? null,
+        previous?.room.revision ?? null,
+        id,
+      ],
     });
-    const row = checkedRoom(result.rows[0]), room = roomFrom(row);
+    const row = checkedRoom(result.rows[0]),
+      room = roomFrom(row);
     let snapshot: Snapshot;
     if (previous && row.members === null) snapshot = { ...previous, row, room };
     else {
       const members = JSON.parse(String(row.members)) as Member[];
-      let rank = 0, previousBingo: number | null = null;
+      let rank = 0,
+        previousBingo: number | null = null;
       const players: Player[] = members.map((member, index) => {
-        const bingoAt = member.bingo_at === null ? null : Number(member.bingo_at);
+        const bingoAt =
+          member.bingo_at === null ? null : Number(member.bingo_at);
         if (bingoAt !== null && bingoAt !== previousBingo) rank = index + 1;
         previousBingo = bingoAt;
-        return { id: member.id, name: member.name, bingoAt, rank: bingoAt === null ? null : rank };
+        return {
+          id: member.id,
+          name: member.name,
+          bingoAt,
+          rank: bingoAt === null ? null : rank,
+        };
       });
-      snapshot = { row, room, members, players, winners: players.filter(player => player.bingoAt !== null),
-        byAuth: new Map(members.map((member, index) => [member.auth_hash, index])) };
+      snapshot = {
+        row,
+        room,
+        members,
+        players,
+        reachCount: members.filter(
+          (member) =>
+            member.bingo_at === null &&
+            cardStatus(JSON.parse(member.card), room.drawn).reach,
+        ).length,
+        receipts: JSON.parse(String(row.receipts)),
+        winners: players.filter((player) => player.bingoAt !== null),
+        byAuth: new Map(
+          members.map((member, index) => [member.auth_hash, index]),
+        ),
+      };
     }
     // A read started before a write must never repopulate an invalidated cache entry.
     if (roomCache.get(id) === current) {
@@ -275,11 +354,14 @@ async function roomSnapshot(store: Awaited<ReturnType<typeof db>>, id: string, k
     }
     return snapshot;
   })();
-  try { return await current.pending; }
-  catch (error) {
+  try {
+    return await current.pending;
+  } catch (error) {
     if (roomCache.get(id) === current) roomCache.delete(id);
     throw error;
-  } finally { current.pending = undefined; }
+  } finally {
+    current.pending = undefined;
+  }
 }
 
 export async function getView(
@@ -291,29 +373,49 @@ export async function getView(
 ): Promise<RoomView | null> {
   validRoomId(id);
   const store = await db();
-  const { row, room, members, players, winners, byAuth } = await roomSnapshot(store, id, revision);
+  const { row, room, members, players, winners, byAuth, receipts, reachCount } =
+    await roomSnapshot(store, id, revision);
   if (hostSecret) checkHost(row, hostSecret);
   if (revision === room.revision) return null;
   const view: RoomView = {
     ...room,
     drawn: [...room.drawn],
-    prizes: room.prizes.map(prize => ({ ...prize })),
+    prizes: room.prizes.map((prize) => ({ ...prize })),
     count: players.length,
+    reachCount,
     limit: room.plan === "event" ? PAID_LIMIT : FREE_LIMIT,
-    winners: cardOnly && !hostSecret ? [] : winners.map(player => ({ ...player })),
+    winners:
+      cardOnly && !hostSecret ? [] : winners.map((player) => ({ ...player })),
   };
   if (hostSecret) {
-    view.players = players.map(player => ({ ...player }));
-    view.paymentStatus = room.plan === "event" ? "paid" : String(
-      (await store.execute({
-        sql: "SELECT status FROM checkout_orders WHERE room_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-        args: [id],
-      })).rows[0]?.status || "none",
-    );
+    view.players = players.map((player) => ({ ...player }));
+    view.pendingPrizes = receipts.filter(
+      (receipt) => !receipt.deliveredAt,
+    ).length;
+    if (row.crew_hash) view.crewKey = crewSecret(id, hostSecret);
+    view.paymentStatus =
+      room.plan === "event"
+        ? "paid"
+        : String(
+            (
+              await store.execute({
+                sql: "SELECT status FROM checkout_orders WHERE room_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                args: [id],
+              })
+            ).rows[0]?.status || "none",
+          );
   }
   if (playerSecret) {
     const index = byAuth.get(hash(playerSecret));
-    if (index !== undefined) view.me = { ...players[index], card: JSON.parse(members[index].card) as Card };
+    if (index !== undefined) {
+      view.me = {
+        ...players[index],
+        card: JSON.parse(members[index].card) as Card,
+      };
+      view.receipts = receipts
+        .filter((receipt) => receipt.playerId === players[index].id)
+        .map((receipt) => ({ ...receipt }));
+    }
   }
   return view;
 }
@@ -366,16 +468,19 @@ export async function hostAction(
             args: [room.drawn.length, id, ...winners],
           });
         room.status = "playing";
+        room.stage = null;
         break;
       }
       case "finish":
         room.status = "finished";
+        room.stage = null;
         break;
       case "reset":
         room.gameNumber++;
         room.status = "lobby";
         room.drawn = [];
-        room.prizes = room.prizes.map((p) => ({ ...p, playerId: null }));
+        room.stage = null;
+        room.featuredPrizeId = null;
         await tx.execute({
           sql: "UPDATE players SET bingo_at=NULL WHERE room_id=?",
           args: [id],
@@ -415,13 +520,59 @@ export async function hostAction(
           room.prizes.some((p) => p.playerId === input.playerId)
         )
           throw new AppError("景品または当選者を確認してください。", 409);
+        const player = (
+          await tx.execute({
+            sql: "SELECT name FROM players WHERE id=? AND room_id=?",
+            args: [String(input.playerId), id],
+          })
+        ).rows[0];
+        const awardId = randomUUID();
+        await tx.execute({
+          sql: "INSERT INTO awards(id,room_id,prize_id,player_id,player_name,prize_name,image_key,game_number,claim_code) VALUES(?,?,?,?,?,?,?,?,?)",
+          args: [
+            awardId,
+            id,
+            prize.id,
+            String(input.playerId),
+            String(player.name),
+            prize.name,
+            prize.imageKey || null,
+            room.gameNumber,
+            String(randomInt(100000, 1000000)),
+          ],
+        });
         prize.playerId = String(input.playerId);
+        prize.awardId = awardId;
+        prize.awardedName = String(player.name);
+        prize.awardedGame = room.gameNumber;
+        prize.deliveredAt = null;
+        room.stage = { mode: "award", prizeId: prize.id };
+        if (room.featuredPrizeId === prize.id) room.featuredPrizeId = null;
         break;
       }
       case "unaward": {
         const prize = room.prizes.find((p) => p.id === input.prizeId);
         if (!prize) throw new AppError("景品が見つかりません。", 404);
+        if (input.expectedAwardId !== prize.awardId)
+          throw new AppError(
+            "当選者が変更されています。最新の景品を確認してください。",
+            409,
+          );
+        if (prize.deliveredAt)
+          throw new AppError(
+            "受け渡し済みです。景品係が受け渡しを取り消してから変更してください。",
+            409,
+          );
+        await tx.execute({
+          sql: "UPDATE awards SET cancelled_at=? WHERE room_id=? AND id=? AND delivered_at IS NULL",
+          args: [Date.now(), id, prize.awardId || ""],
+        });
         prize.playerId = null;
+        delete prize.awardId;
+        delete prize.awardedName;
+        delete prize.awardedGame;
+        delete prize.deliveredAt;
+        room.stage = null;
         break;
       }
       case "remove_prize": {
@@ -434,16 +585,38 @@ export async function hostAction(
         room.prizes = room.prizes.filter((p) => p.id !== input.prizeId);
         break;
       }
+      case "stage": {
+        if (input.mode === "draw") room.stage = null;
+        else if (input.mode === "history") room.stage = { mode: "history" };
+        else if (input.mode === "prize") {
+          const prize = room.prizes.find(
+            (p) => p.id === input.prizeId && !p.playerId,
+          );
+          if (!prize)
+            throw new AppError("紹介する景品を選び直してください。", 409);
+          room.stage = { mode: "prize", prizeId: prize.id };
+          room.featuredPrizeId = prize.id;
+        } else throw new AppError("表示を選んでください。");
+        break;
+      }
+      case "crew":
+        await tx.execute({
+          sql: "UPDATE rooms SET crew_hash=? WHERE id=?",
+          args: [hash(crewSecret(id, secret!)), id],
+        });
+        break;
       default:
         throw new AppError("操作を確認してください。");
     }
     await tx.execute({
-      sql: "UPDATE rooms SET status=?,drawn=?,prizes=?,game_number=?,revision=revision+1 WHERE id=?",
+      sql: "UPDATE rooms SET status=?,drawn=?,prizes=?,game_number=?,stage=?,featured_prize_id=?,revision=revision+1 WHERE id=?",
       args: [
         room.status,
         JSON.stringify(room.drawn),
         JSON.stringify(room.prizes),
         room.gameNumber,
+        JSON.stringify(room.stage || null),
+        room.featuredPrizeId || null,
         id,
       ],
     });
@@ -465,4 +638,27 @@ export async function printableCards(id: string, secret: string | null) {
     name: String(p.name),
     card: JSON.parse(String(p.card)) as Card,
   }));
+}
+
+// Only identity metadata leaves this private snapshot helper; never return auth hashes/cards.
+export async function liveAccess(
+  id: string,
+  hostSecret: string | null,
+  playerSecret?: string,
+) {
+  validRoomId(id);
+  const snapshot = await roomSnapshot(await db(), id);
+  if (hostSecret) {
+    checkHost(snapshot.row, hostSecret);
+    return { host: true, id: "host", name: "司会", room: snapshot.room };
+  }
+  const index = playerSecret
+    ? snapshot.byAuth.get(hash(playerSecret))
+    : undefined;
+  return {
+    host: false,
+    id: index === undefined ? null : snapshot.players[index].id,
+    name: index === undefined ? null : snapshot.players[index].name,
+    room: snapshot.room,
+  };
 }

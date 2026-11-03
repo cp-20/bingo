@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdir, writeFile, copyFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, copyFile, cp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 const output = resolve("demo/dist");
 await rm(output, { recursive: true, force: true });
@@ -29,10 +29,12 @@ for (const path of [
   "host/DEMO8888/print",
   "join/DEMO8888",
   "screen/DEMO8888",
+  "crew/DEMO8888",
 ]) {
   await mkdir(`${output}/${path}`, { recursive: true });
   await writeFile(`${output}/${path}/index.html`, html);
 }
+await cp("public/demo-prizes", `${output}/demo-prizes`, { recursive: true });
 await copyFile("src/app/icon.svg", `${output}/icon.svg`);
 // Static copies keep documentation links useful without routing to the production service.
 for (const [path, title, text] of [

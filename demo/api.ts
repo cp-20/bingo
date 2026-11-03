@@ -1,4 +1,11 @@
-import type { Card, Player, Room, RoomView } from "../src/lib/game";
+import type {
+  Card,
+  Player,
+  Room,
+  RoomView,
+  CommunityFeed,
+  Receipt,
+} from "../src/lib/game";
 import { cardStatus } from "../src/lib/card";
 import { clientSecret, RequestError } from "../src/lib/client";
 export {
@@ -6,12 +13,20 @@ export {
   savedSecret,
   saveSecret,
   RequestError,
+  notifyRoom,
 } from "../src/lib/client";
 
 export const DEMO_ID = "DEMO8888";
 const storage = "bingo-room-demo-v1";
 type Guest = Player & { card: Card; secret: string };
-type State = Room & { hostKey: string; guests: Guest[] };
+type State = Room & {
+  hostKey: string;
+  crewKey: string;
+  guests: Guest[];
+  live: CommunityFeed;
+  receipts: Receipt[];
+  images: Record<string, string>;
+};
 
 function card(): Card {
   const columns = Array.from({ length: 5 }, (_, column) => {
@@ -52,10 +67,63 @@ export function resetDemo(title = "みんなで忘年会 2026") {
     title,
     hostKey,
     guests,
+    crewKey: clientSecret(),
+    receipts: [],
+    images: {},
+    stage: null,
+    featuredPrizeId: null,
+    live: {
+      revision: 1,
+      chatEnabled: true,
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          name: "さくら",
+          body: "お肉のギフト、狙ってます！",
+          host: false,
+          createdAt: now - 20000,
+        },
+        {
+          id: crypto.randomUUID(),
+          name: "田中さん",
+          body: "みなさんよろしく！",
+          host: false,
+          createdAt: now - 10000,
+        },
+        {
+          id: crypto.randomUUID(),
+          name: "司会",
+          body: "景品をチェックしながら、カードを開いてお待ちください。",
+          host: true,
+          createdAt: now,
+        },
+      ],
+      pinned: null,
+      reactions: { clap: 0, cheer: 0, wow: 0 },
+    },
     status: "lobby",
     plan: "free",
     drawn: [],
-    prizes: [],
+    prizes: [
+      {
+        id: crypto.randomUUID(),
+        name: "ワイヤレスヘッドホン",
+        imageKey: "sample-headphones",
+        playerId: null,
+      },
+      {
+        id: crypto.randomUUID(),
+        name: "コーヒーギフト",
+        imageKey: "sample-coffee",
+        playerId: null,
+      },
+      {
+        id: crypto.randomUUID(),
+        name: "お肉のごちそう便",
+        imageKey: "sample-beef",
+        playerId: null,
+      },
+    ],
     createdAt: now,
     expiresAt: now + 7 * 86400000,
     revision: 1,
@@ -72,7 +140,9 @@ function read(): State {
     if (
       value?.id === DEMO_ID &&
       Array.isArray(value.guests) &&
-      Array.isArray(value.drawn)
+      Array.isArray(value.drawn) &&
+      value.live &&
+      value.crewKey
     )
       return value;
   } catch {
@@ -95,8 +165,13 @@ export function previewBingo() {
     guest.bingoAt = null;
     guest.rank = null;
   });
+  state.stage = null;
+  state.receipts = [];
   state.prizes.forEach((prize) => {
     prize.playerId = null;
+    delete prize.awardId;
+    delete prize.awardedName;
+    delete prize.deliveredAt;
   });
   state.revision++;
   const revision = state.revision;
@@ -119,7 +194,15 @@ export function previewBingo() {
   }, 900);
 }
 function view(state: State, headers: Headers): RoomView {
-  const { hostKey, guests, ...room } = state;
+  const {
+    hostKey,
+    guests,
+    crewKey,
+    live: _live,
+    receipts,
+    images: _images,
+    ...room
+  } = state;
   const players = guests.map(
     ({ secret: _secret, card: _card, ...player }) => player,
   );
@@ -130,13 +213,25 @@ function view(state: State, headers: Headers): RoomView {
   return {
     ...room,
     count: guests.length,
+    reachCount: guests.filter(
+      (g) => g.bingoAt === null && cardStatus(g.card, room.drawn).reach,
+    ).length,
     limit: room.plan === "event" ? 300 : 30,
     winners: players
       .filter((p) => p.bingoAt !== null)
       .sort((a, b) => a.bingoAt! - b.bingoAt!),
-    ...(host ? { players, paymentReady: false, paymentStatus: "none" } : {}),
+    ...(host
+      ? {
+          players,
+          crewKey,
+          pendingPrizes: receipts.filter((r) => !r.deliveredAt).length,
+          paymentReady: false,
+          paymentStatus: "none",
+        }
+      : {}),
     ...(own
       ? {
+          receipts: receipts.filter((r) => r.playerId === own.id),
           me: players.find((player) => player.id === own.id) && {
             ...players.find((player) => player.id === own.id)!,
             card: own.card,
@@ -186,6 +281,85 @@ function dispatch(url: string, init: RequestInit) {
   const state = read(),
     host = headers.get("authorization") === `Bearer ${state.hostKey}`;
   const suffix = parsed.pathname.slice(`/api/rooms/${DEMO_ID}`.length);
+  if (suffix === "/sync")
+    return { room: view(state, headers), live: feed(state, headers) };
+  if (suffix === "/community" && init.method === "POST") {
+    const person = state.guests.find(
+      (g) => g.secret === headers.get("x-player-key"),
+    );
+    if (!host && !person) fail("参加してからご利用ください。", 401);
+    const input = JSON.parse(String(init.body)),
+      live = state.live;
+    if (input.action === "message") {
+      if (!host && !live.chatEnabled) fail("チャットは一時お休み中です。");
+      const body = String(input.body).trim();
+      if (!body || [...body].length > 140)
+        fail("1〜140文字で入力してください。", 400);
+      if (!live.messages.some((m) => m.id === input.messageId))
+        live.messages.push({
+          id: input.messageId,
+          name: host ? "司会" : person!.name,
+          body,
+          host,
+          createdAt: Date.now(),
+        });
+      live.messages = live.messages.slice(-60);
+    } else if (input.action === "reaction") {
+      if (
+        input.gameNumber !== state.gameNumber ||
+        input.drawCount !== state.drawn.length
+      )
+        fail("新しい番号に切り替わりました。");
+      const reactionKey = `demo-react-${host ? "host" : person!.id}-${state.gameNumber}-${state.drawn.length}`;
+      if (
+        !localStorage.getItem(reactionKey) &&
+        ["clap", "cheer", "wow"].includes(input.kind)
+      ) {
+        live.reactions[input.kind as keyof typeof live.reactions]++;
+        localStorage.setItem(reactionKey, input.kind);
+      }
+    } else {
+      if (!host) fail("幹事だけが変更できます。", 403);
+      if (input.action === "pause") live.chatEnabled = !!input.enabled;
+      else if (input.action === "pin")
+        live.pinned =
+          live.messages.find((m) => m.id === input.messageId) || null;
+      else if (input.action === "hide") {
+        live.messages = live.messages.filter((m) => m.id !== input.messageId);
+        if (live.pinned?.id === input.messageId) live.pinned = null;
+      }
+    }
+    live.revision++;
+    save(state);
+    return { live: feed(state, headers) };
+  }
+  if (suffix === "/crew") {
+    if (headers.get("authorization") !== `Bearer ${state.crewKey}`)
+      fail("景品係用リンクから開いてください。", 401);
+    if (init.method === "POST") {
+      const input = JSON.parse(String(init.body)),
+        receipt = state.receipts.find((r) => r.id === input.awardId);
+      if (!receipt || receipt.playerId !== input.playerId)
+        fail("当選者が変更されています。");
+      if (!input.undo && input.claimCode !== receipt.claimCode)
+        fail("6桁の受け取り番号を確認してください。");
+      if (input.expectedDeliveredAt !== receipt.deliveredAt)
+        fail(
+          "別の操作で受け渡し状況が変わりました。最新の一覧を確認してください。",
+        );
+      receipt.deliveredAt = input.undo
+        ? null
+        : receipt.deliveredAt || Date.now();
+      const prize = state.prizes.find((p) => p.awardId === receipt.id);
+      if (prize) prize.deliveredAt = receipt.deliveredAt;
+      state.revision++;
+      save(state);
+    }
+    return {
+      title: state.title,
+      items: state.receipts.map(({ claimCode: _private, ...item }) => item),
+    };
+  }
   if (suffix === "/export") {
     if (!host) fail("幹事画面から開いてください。", 401);
     return state.guests.map(({ id, name, card }) => ({ id, name, card }));
@@ -243,6 +417,9 @@ function dispatch(url: string, init: RequestInit) {
           ],
         );
         state.status = "playing";
+        state.stage = null;
+        state.live.reactions = { clap: 0, cheer: 0, wow: 0 };
+        state.live.revision++;
         for (const guest of state.guests)
           if (
             guest.bingoAt === null &&
@@ -256,7 +433,10 @@ function dispatch(url: string, init: RequestInit) {
         state.gameNumber++;
         state.status = "lobby";
         state.drawn = [];
-        state.prizes.forEach((p) => (p.playerId = null));
+        state.stage = null;
+        state.featuredPrizeId = null;
+        state.live.reactions = { clap: 0, cheer: 0, wow: 0 };
+        state.live.revision++;
         state.guests.forEach((g) => {
           g.bingoAt = null;
           g.rank = null;
@@ -264,6 +444,7 @@ function dispatch(url: string, init: RequestInit) {
         break;
       case "finish":
         state.status = "finished";
+        state.stage = null;
         break;
       case "prize":
         if (!prize) {
@@ -286,15 +467,54 @@ function dispatch(url: string, init: RequestInit) {
         )
           fail("景品または当選者を確認してください。");
         prize.playerId = input.playerId;
+        const winner = state.guests.find((g) => g.id === input.playerId)!;
+        prize.awardId = crypto.randomUUID();
+        prize.awardedName = winner.name;
+        prize.awardedGame = state.gameNumber;
+        prize.deliveredAt = null;
+        state.receipts.push({
+          id: prize.awardId,
+          prizeId: prize.id,
+          prizeName: prize.name,
+          imageKey: prize.imageKey,
+          playerId: winner.id,
+          playerName: winner.name,
+          gameNumber: state.gameNumber,
+          claimCode: String(
+            100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000),
+          ),
+          deliveredAt: null,
+        });
+        state.stage = { mode: "award", prizeId: prize.id };
+        if (state.featuredPrizeId === prize.id) state.featuredPrizeId = null;
         break;
       case "unaward":
         if (!prize) fail("景品が見つかりません。");
+        if (input.expectedAwardId !== prize.awardId)
+          fail("当選者が変更されています。");
+        if (prize.deliveredAt)
+          fail("受け渡し済みです。景品係が取り消してから変更してください。");
+        state.receipts = state.receipts.filter((r) => r.id !== prize.awardId);
         prize.playerId = null;
+        delete prize.awardId;
+        delete prize.awardedName;
+        delete prize.deliveredAt;
+        state.stage = null;
         break;
       case "remove_prize":
         if (!prize || prize.playerId)
           fail("先に割り当てを取り消してください。");
         state.prizes = state.prizes.filter((p) => p.id !== input.prizeId);
+        break;
+      case "stage":
+        if (input.mode === "draw") state.stage = null;
+        else if (input.mode === "history") state.stage = { mode: "history" };
+        else if (input.mode === "prize" && prize && !prize.playerId) {
+          state.stage = { mode: "prize", prizeId: prize.id };
+          state.featuredPrizeId = prize.id;
+        } else fail("紹介する景品を選び直してください。");
+        break;
+      case "crew":
         break;
       default:
         fail("この操作は体験デモでは利用できません。", 400);
@@ -308,7 +528,53 @@ function dispatch(url: string, init: RequestInit) {
     return null;
   return view(state, headers);
 }
+function save(state: State) {
+  localStorage.setItem(storage, JSON.stringify(state));
+}
+function feed(state: State, headers: Headers): CommunityFeed {
+  const host = headers.get("authorization") === `Bearer ${state.hostKey}`,
+    player = state.guests.find((g) => g.secret === headers.get("x-player-key"));
+  const myReaction =
+    localStorage.getItem(
+      `demo-react-${host ? "host" : player?.id}-${state.gameNumber}-${state.drawn.length}`,
+    ) || undefined;
+  return {
+    ...state.live,
+    messages: host || player ? state.live.messages : [],
+    myReaction,
+  };
+}
+export function imageSource(_roomId: string, key: string) {
+  return read().images[key] || "";
+}
 export async function api<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const parsed = new URL(url, location.origin);
+  if (parsed.pathname.endsWith("/prize-image") && init.method === "POST") {
+    const state = read();
+    if (
+      new Headers(init.headers).get("authorization") !==
+      `Bearer ${state.hostKey}`
+    )
+      fail("幹事用リンクから開いてください。", 401);
+    const prize = state.prizes.find(
+      (p) => p.id === parsed.searchParams.get("prizeId") && !p.playerId,
+    );
+    if (!prize) fail("未割り当ての景品を選び直してください。");
+    if (!(init.body instanceof Blob) || init.body.size > 512 * 1024)
+      fail("写真が大きすぎます。", 413);
+    const data = new Uint8Array(await init.body.arrayBuffer()),
+      digest = await crypto.subtle.digest("SHA-256", data),
+      key = Array.from(new Uint8Array(digest))
+        .map((n) => n.toString(16).padStart(2, "0"))
+        .join("");
+    let raw = "";
+    for (const n of data) raw += String.fromCharCode(n);
+    state.images[key] = `data:image/jpeg;base64,${btoa(raw)}`;
+    prize.imageKey = key;
+    state.revision++;
+    save(state);
+    return { imageKey: key, room: view(state, new Headers(init.headers)) } as T;
+  }
   // shortcut: demo state is browser-local; actual events use the server APIs and durable DB.
   return dispatch(url, init) as T;
 }

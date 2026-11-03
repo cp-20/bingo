@@ -46,9 +46,12 @@ export async function body(request: NextRequest) {
   return result as Record<string, unknown>;
 }
 export async function limitedText(request: NextRequest, maxBytes: number) {
+  return (await limitedBytes(request, maxBytes)).toString("utf8");
+}
+export async function limitedBytes(request: NextRequest, maxBytes: number) {
   if (Number(request.headers.get("content-length")) > maxBytes)
     throw new AppError("入力が長すぎます。", 413);
-  if (!request.body) return "";
+  if (!request.body) return Buffer.alloc(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -63,7 +66,7 @@ export async function limitedText(request: NextRequest, maxBytes: number) {
       }
       chunks.push(value);
     }
-    return Buffer.concat(chunks).toString("utf8");
+    return Buffer.concat(chunks);
   } finally {
     reader.releaseLock();
   }

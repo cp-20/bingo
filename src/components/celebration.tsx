@@ -2,14 +2,18 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 // Celebrate a new result, never a restored card or a poll with the same result.
-export function useCelebration(game: number, winners: number) {
-  const previous = useRef({ game, winners });
+export function useCelebration(game: number, winners: number, draw?: number) {
+  const previous = useRef({ game, winners, draw });
   const sequence = useRef(0);
   const [burst, setBurst] = useState(0);
   useEffect(() => {
     const before = previous.current;
-    previous.current = { game, winners };
-    if (before.game !== game || winners < before.winners) {
+    previous.current = { game, winners, draw };
+    if (
+      before.game !== game ||
+      winners < before.winners ||
+      (before.draw !== draw && winners === before.winners)
+    ) {
       setBurst(0);
       return;
     }
@@ -17,7 +21,7 @@ export function useCelebration(game: number, winners: number) {
     setBurst(++sequence.current);
     const timer = setTimeout(() => setBurst(0), 2600);
     return () => clearTimeout(timer);
-  }, [game, winners]);
+  }, [game, winners, draw]);
   return burst;
 }
 

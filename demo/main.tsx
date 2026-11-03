@@ -1,9 +1,11 @@
 import { createRoot } from "react-dom/client";
 import RoomClient, { PrintCards } from "../src/components/room";
+import Crew from "../src/components/crew";
 import Landing from "../src/components/landing";
 import { DEMO_ID, prepareDemo, previewBingo, resetDemo } from "./api";
 import { useEffect } from "react";
 import "../src/app/globals.css";
+import "../src/app/venue.css";
 import "./style.css";
 
 function App() {
@@ -48,6 +50,7 @@ function App() {
           <nav aria-label="デモ画面切り替え">
             {[
               ["幹事", `/host/${DEMO_ID}/`],
+              ["景品係", `/crew/${DEMO_ID}/`],
               ["参加者", `/join/${DEMO_ID}/`],
               ["会場スクリーン", `/screen/${DEMO_ID}/`],
               ["紹介ページ", "/about/"],
@@ -61,7 +64,11 @@ function App() {
               </a>
             ))}
             <button
-              onClick={() => location.assign(`/join/${DEMO_ID}/?preview=bingo`)}
+              onClick={() =>
+                location.assign(
+                  `/${role === "screen" ? "screen" : "join"}/${DEMO_ID}/?preview=bingo`,
+                )
+              }
             >
               ビンゴの演出を試す
             </button>
@@ -79,11 +86,13 @@ function App() {
             </button>
           </nav>
           <small>
-            QR・参加リンクはこのブラウザの別タブで体験できます。他の端末とは同期しません。
+            QR・参加リンクはこのブラウザの別タブで体験できます。他の端末とは同期しません。景品はすべて架空のサンプルです。
           </small>
         </details>
       </aside>
-      {path.startsWith("/about") ? (
+      {path.startsWith("/crew") ? (
+        <Crew id={DEMO_ID} />
+      ) : path.startsWith("/about") ? (
         <Landing />
       ) : path.endsWith("/print/") || path.endsWith("/print") ? (
         <PrintCards id={DEMO_ID} />

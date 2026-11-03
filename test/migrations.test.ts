@@ -15,9 +15,23 @@ test("v1 data survives concurrent upgrades, including a legacy pending checkout"
       INSERT INTO rooms VALUES('ABCD2345','private-hash','Existing event','playing','free','[7,12]','[]',1,9999999999999,4,'cs_legacy',0);
       CREATE TABLE players(id TEXT PRIMARY KEY,room_id TEXT,auth_hash TEXT,name TEXT,name_key TEXT,card TEXT,bingo_at INTEGER,joined_at INTEGER,UNIQUE(room_id,name_key));
       INSERT INTO players VALUES('player','ABCD2345','card-hash','Alice','alice','[1,2,3]',NULL,1);`);
+    await first.execute({
+      sql: "UPDATE rooms SET prizes=?",
+      args: [
+        JSON.stringify([
+          { id: "gift", name: "既存の景品", playerId: "player" },
+        ]),
+      ],
+    });
     await Promise.all([migrate(first), migrate(second)]);
     const row = (await first.execute("SELECT * FROM rooms")).rows[0];
     assert.equal(row.title, "Existing event");
+    const prize = JSON.parse(String(row.prizes))[0];
+    assert.equal(prize.playerId, "player");
+    assert.equal(prize.awardedName, "Alice");
+    const receipt = (await first.execute("SELECT * FROM awards")).rows[0];
+    assert.equal(receipt.id, prize.awardId);
+    assert.match(String(receipt.claim_code), /^\d{6}$/);
     assert.equal(row.host_hash, "private-hash");
     assert.equal(row.drawn, "[7,12]");
     assert.equal(Number(row.game_number), 1);

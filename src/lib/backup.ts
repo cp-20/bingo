@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import { migrate, SCHEMA_VERSION } from "./db";
+import { migrate, SCHEMA_VERSION, upgradeLegacyAwards } from "./db";
 
 const tables = [
   "rooms",
@@ -7,6 +7,11 @@ const tables = [
   "checkout_orders",
   "payments",
   "rate_limits",
+  "room_live",
+  "messages",
+  "reactions",
+  "prize_images",
+  "awards",
 ] as const;
 type Cell = string | number | null;
 export type Snapshot = {
@@ -46,9 +51,13 @@ export async function restoreSnapshot(store: Client, input: unknown) {
   const backup = input as Snapshot;
   if (
     backup.format !== 1 ||
-    backup.schema !== SCHEMA_VERSION ||
+    ![2, SCHEMA_VERSION].includes(backup.schema) ||
     !backup.tables ||
-    tables.some((table) => !Array.isArray(backup.tables[table]))
+    tables.some(
+      (table, index) =>
+        (backup.schema !== 2 || index < 5) &&
+        !Array.isArray(backup.tables[table]),
+    )
   )
     throw new Error("Unsupported backup format or schema");
   await migrate(store);
@@ -66,7 +75,7 @@ export async function restoreSnapshot(store: Client, input: unknown) {
           String(row.name),
         ),
       );
-      for (const row of backup.tables[table]) {
+      for (const row of backup.tables[table] || []) {
         const columns = Object.keys(row);
         if (
           !columns.length ||
@@ -85,6 +94,10 @@ export async function restoreSnapshot(store: Client, input: unknown) {
         });
       }
     }
+    await tx.execute(
+      "INSERT OR IGNORE INTO room_live(room_id) SELECT id FROM rooms",
+    );
+    if (backup.schema === 2) await upgradeLegacyAwards(tx);
     await tx.commit();
   } catch (error) {
     try {

@@ -178,12 +178,14 @@ test("the venue fits a long event name and winners while prizes can be handed ov
     localStorage.setItem("bingo-room-demo-v1", JSON.stringify(room));
     window.dispatchEvent(new Event("online"));
   });
-  await expect(page.locator(".screen-draw .draw-ball-number")).toHaveText("75");
-  await expect(page.locator(".screen-winner-names b")).toHaveCount(6);
+  await expect(page.locator(".bingo-called .draw-ball-number")).toHaveText(
+    "75",
+  );
+  await expect(page.locator(".winner-spotlights strong")).toHaveCount(4);
   for (const height of [720, 800, 1080]) {
     await page.setViewportSize({ width: 1280, height });
-    const board = await page.locator(".screen-board").boundingBox();
-    const winners = await page.locator(".screen-winners").boundingBox();
+    const board = await page.locator(".venue-footer").boundingBox();
+    const winners = await page.locator(".show-winners").boundingBox();
     expect(board!.y + board!.height).toBeLessThanOrEqual(height);
     expect(winners!.y + winners!.height).toBeLessThanOrEqual(height);
   }

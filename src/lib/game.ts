@@ -4,7 +4,46 @@ export const FREE_LIMIT = 30;
 export const PAID_LIMIT = 300;
 export const EVENT_PRICE = 2980;
 export type Card = number[];
-export type Prize = { id: string; name: string; playerId: string | null };
+export type Prize = {
+  id: string;
+  name: string;
+  playerId: string | null;
+  imageKey?: string;
+  awardId?: string;
+  awardedName?: string;
+  awardedGame?: number;
+  deliveredAt?: number | null;
+};
+export type Stage = {
+  mode: "prize" | "award" | "history";
+  prizeId?: string;
+} | null;
+export type Receipt = {
+  id: string;
+  prizeId: string;
+  prizeName: string;
+  imageKey?: string;
+  playerId: string;
+  playerName: string;
+  gameNumber: number;
+  claimCode: string;
+  deliveredAt: number | null;
+};
+export type ChatMessage = {
+  id: string;
+  name: string;
+  body: string;
+  host: boolean;
+  createdAt: number;
+};
+export type CommunityFeed = {
+  revision: number;
+  chatEnabled: boolean;
+  messages: ChatMessage[];
+  pinned: ChatMessage | null;
+  reactions: { clap: number; cheer: number; wow: number };
+  myReaction?: string;
+};
 export type Room = {
   id: string;
   title: string;
@@ -16,6 +55,8 @@ export type Room = {
   expiresAt: number;
   revision: number;
   gameNumber: number;
+  stage?: Stage;
+  featuredPrizeId?: string | null;
 };
 export type Player = {
   id: string;
@@ -31,6 +72,10 @@ export type RoomView = Room & {
   me?: Player & { card: Card };
   paymentReady?: boolean;
   paymentStatus?: string;
+  reachCount?: number;
+  receipts?: Receipt[];
+  pendingPrizes?: number;
+  crewKey?: string;
 };
 
 export function makeCard(): Card {
