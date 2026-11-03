@@ -54,3 +54,19 @@ test("the sample venue showcases real photos, pins one comment and returns from 
   await expect(screen.locator(".show-draw")).toBeVisible();
   await expect(screen.locator(".number-board")).toHaveCount(0);
 });
+
+test("the demo role switch opens the staff view without a separate credential setup", async ({
+  page,
+}) => {
+  await page.goto("/host/DEMO8888/");
+  await page.getByText("画面を切り替える", { exact: true }).click();
+  await page.getByRole("link", { name: "景品係", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "受け渡し待ち 0" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("幹事から景品係用リンクを受け取ってください。", {
+      exact: true,
+    }),
+  ).toHaveCount(0);
+});

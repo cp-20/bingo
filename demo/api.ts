@@ -151,7 +151,8 @@ function read(): State {
   return resetDemo();
 }
 export function prepareDemo() {
-  read();
+  const state = read();
+  localStorage.setItem(`bingo-crew-${DEMO_ID}`, state.crewKey);
 }
 export function previewBingo() {
   const state = read();
