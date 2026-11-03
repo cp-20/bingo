@@ -53,6 +53,19 @@ test("75 draws never repeat and the 76th draw is rejected", () => {
   assert.equal(new Set(drawn).size, 75);
   assert.throws(() => nextNumber(drawn));
 });
+test("reach identifies the actual uncalled numbers without repeating the free square", () => {
+  const card = [
+    7, 19, 34, 49, 65, 11, 22, 38, 52, 70, 3, 27, 0, 55, 62, 14, 16, 41, 47, 73,
+    9, 24, 43, 58, 68,
+  ];
+  const near = cardStatus(card, [7, 19, 34, 49]);
+  assert.equal(near.bingo, false);
+  assert.deepEqual(near.needed, [65]);
+  const complete = cardStatus(card, [7, 19, 34, 49, 65]);
+  assert.equal(complete.bingo, true);
+  assert.ok(!complete.needed.includes(0));
+  assert.equal(new Set(complete.needed).size, complete.needed.length);
+});
 test("names normalize safely and CSV cells cannot start spreadsheet formulas", () => {
   assert.equal(cleanName("  Ａｌｉｃｅ\n "), "Alice");
   assert.throws(() => cleanName(null));

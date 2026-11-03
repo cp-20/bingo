@@ -17,5 +17,12 @@ export function cardStatus(card: Card, drawn: number[]) {
   return {
     bingo: missing.some((line) => line.length === 0),
     reach: missing.filter((line) => line.length === 1).length,
+    needed: [
+      ...new Set(
+        missing
+          .filter((line) => line.length === 1)
+          .map((line) => card[line[0]]),
+      ),
+    ].sort((a, b) => a - b),
   };
 }

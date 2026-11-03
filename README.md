@@ -79,6 +79,8 @@ CIはGitHub Actionsで型チェック・単体テスト・本番ビルド・Chro
 - 300人の実際の会場・本番環境での負荷試験は別途必要です。CIは人数制限とローカル並行読み出しを検証します。
 - 収益化にはsandboxでの実決済テストに加え、販売者情報・返金条件・live決済の別途準備が必要です。
 
+体験デモは [Sites](https://bingo-room-demo.cp20-dev.chatgpt.site) に用意しています。ブラウザ内のサンプル6人で動作し、課金はありません。[ソースと実行方法](docs/DEMO.md)。
+
 画面設計とレビュー観点：[docs/DESIGN.md](docs/DESIGN.md)
 
 仕様と価格検討：[docs/PRODUCT.md](docs/PRODUCT.md)
