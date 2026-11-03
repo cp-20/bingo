@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 
 process.env.TURSO_DATABASE_URL = `file:${join(mkdtempSync(join(tmpdir(), "bingo-test-")), "test.db")}`;
-const { createRoom, getView, joinRoom, hostAction, printableCards, AppError } =
+const { createRoom, getView, joinRoom, hostAction, printableCards, invalidateRoom, AppError } =
   await import("../src/lib/service");
-const { db } = await import("../src/lib/db");
+const { db, writeTransaction } = await import("../src/lib/db");
 
 test("host authorization and player card privacy are enforced", async () => {
   const room = await createRoom("Test room", "test-privacy");
@@ -265,6 +265,97 @@ test("retrying a prize registration keeps one prize", async () => {
     hostAction(room.id, room.hostToken, { ...command, name: "Other" }),
     /内容/,
   );
+});
+
+
+test("card projection never includes other cards, credentials, or the winner roster", async () => {
+  const event = await createRoom("Card projection", "projection");
+  const alice = await joinRoom(event.id, "Alice", undefined);
+  const bob = await joinRoom(event.id, "Bob", undefined);
+  await (await db()).execute({sql:"UPDATE players SET bingo_at=1 WHERE room_id=?",args:[event.id]});
+  invalidateRoom(event.id);
+  const card = (await getView(event.id, null, alice.secret, undefined, true))!;
+  assert.equal(card.me?.name, "Alice");
+  assert.equal(card.me?.rank, 1);
+  assert.equal(card.me?.card.length, 25);
+  assert.deepEqual(card.winners, []);
+  assert.equal(card.players, undefined);
+  assert.ok(!JSON.stringify(card).includes("auth_hash"));
+  assert.ok(!JSON.stringify(card).includes(bob.secret));
+  const publicView = (await getView(event.id, null))!;
+  assert.equal(publicView.winners.length, 2);
+  assert.equal(publicView.me, undefined);
+  assert.ok(!JSON.stringify(publicView).includes('"card":'));
+  assert.equal((await getView(event.id, null, bob.secret, undefined, true))!.me?.name, "Bob");
+  await assert.rejects(getView(event.id, "x".repeat(43), undefined, publicView.revision), error => error instanceof AppError && error.status === 401);
+});
+test("concurrent polls share one database snapshot and expire within a second", async () => {
+  const event = await createRoom("Cached poll", "cached-poll");
+  await joinRoom(event.id, "Alice", undefined);
+  const store = await db(), original = store.execute.bind(store);
+  let reads = 0;
+  store.execute = async (...args: Parameters<typeof original>) => { reads++; return original(...args); };
+  try {
+    const views = await Promise.all(Array.from({length:100}, () => getView(event.id, null)));
+    assert.equal(reads, 1);
+    assert.ok(views.every(view => view?.count === 1));
+    await original({sql:"UPDATE rooms SET title='External update',revision=revision+1 WHERE id=?",args:[event.id]});
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.equal((await getView(event.id, null))!.title, "External update");
+    assert.equal(reads, 2);
+  } finally { store.execute = original; }
+});
+test("writes invalidate snapshots immediately and a newer known revision bypasses old data", async () => {
+  const event = await createRoom("Cache invalidation", "cache-invalidation");
+  const first = (await getView(event.id, null))!;
+  await joinRoom(event.id, "Alice", undefined);
+  const joined = (await getView(event.id, null, undefined, first.revision))!;
+  assert.equal(joined.count, 1);
+  await hostAction(event.id, event.hostToken, {action:"draw",expectedGameNumber:1,expectedDrawCount:0});
+  const drawn = (await getView(event.id, null, undefined, joined.revision))!;
+  assert.equal(drawn.drawn.length, 1);
+  await (await db()).execute({sql:"UPDATE rooms SET title='Other process',revision=revision+1 WHERE id=?",args:[event.id]});
+  assert.equal(await getView(event.id, null, undefined, drawn.revision+1), null);
+  assert.equal((await getView(event.id, null))!.title, "Other process");
+});
+test("cached room data cannot extend an event past its expiry", async () => {
+  const event = await createRoom("Expires soon", "cache-expiry");
+  await (await db()).execute({sql:"UPDATE rooms SET expires_at=? WHERE id=?",args:[Date.now()+1000,event.id]});
+  assert.equal((await getView(event.id, null))!.title, "Expires soon");
+  const clock = Date.now;
+  const afterExpiry = clock()+1100;
+  Date.now = () => afterExpiry;
+  try { await assert.rejects(getView(event.id, null), error => error instanceof AppError && error.status === 410); }
+  finally { Date.now = clock; }
+});
+test("write queue preserves ordering and releases after a failed operation", async () => {
+  const order:number[]=[];
+  const outcomes = await Promise.allSettled(Array.from({length:20},(_,i)=>writeTransaction(async () => {
+    order.push(i);
+    if(i===4) throw new Error("fixture failure");
+    return i;
+  })));
+  assert.deepEqual(order,Array.from({length:20},(_,i)=>i));
+  assert.equal(outcomes.filter(result=>result.status==="fulfilled").length,19);
+  assert.equal(await writeTransaction(async()=>42),42);
+});
+test("write queue rejects excess waiting work without blocking later operations", async () => {
+  let release!:()=>void, entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const started=new Promise<void>(resolve=>{entered=resolve;});
+  const active=writeTransaction(async()=>{entered();await gate;});
+  await started;
+  const waiting=Promise.allSettled(Array.from({length:129},()=>writeTransaction(async()=>true)));
+  // Let every caller enter the queue while the first transaction is held.
+  await new Promise<void>(resolve=>setImmediate(resolve));
+  release();
+  await active;
+  const results=await waiting;
+  assert.equal(results.filter(result=>result.status==="fulfilled").length,128);
+  const rejected=results.filter(result=>result.status==="rejected");
+  assert.equal(rejected.length,1);
+  assert.ok(rejected[0].reason instanceof AppError && rejected[0].reason.code==="WRITE_QUEUE_FULL");
+  assert.equal(await writeTransaction(async()=>42),42);
 });
 
 test("a creator budget does not interrupt existing events", async () => {

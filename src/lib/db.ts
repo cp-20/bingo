@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomInt } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { AppError } from "./errors";
 
 let client: Client | undefined;
 let initialized: Promise<void> | undefined;
@@ -158,6 +159,7 @@ export async function db() {
       fetch: (input: RequestInfo | URL, init?: RequestInit) =>
         fetch(input, {
           ...init,
+          cache: "no-store",
           signal: AbortSignal.any([
             ...(init?.signal ? [init.signal] : []),
             AbortSignal.timeout(8000),
@@ -177,6 +179,28 @@ export async function db() {
   return client;
 }
 
+// libSQL HTTP clients share one write stream per process. Bound waiting work and release on every outcome.
+let writing = false;
+const writeWaiters: (() => void)[] = [];
 export async function writeTransaction<T>(fn: (tx: Transaction) => Promise<T>) {
-  return transaction(await db(), fn);
+  const store = await db();
+  if (writing) {
+    if (writeWaiters.length >= 128)
+      throw new AppError("操作が混み合っています。少し待って再度お試しください。", 503, "WRITE_QUEUE_FULL", 2);
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        const index = writeWaiters.indexOf(ready);
+        if (index >= 0) writeWaiters.splice(index, 1);
+        reject(new AppError("操作の待ち時間が長くなっています。最新の状態を確認して再度お試しください。", 503, "WRITE_QUEUE_TIMEOUT", 2));
+      }, 8000);
+      writeWaiters.push(ready);
+    });
+  } else writing = true;
+  try { return await transaction(store, fn); }
+  finally {
+    const next = writeWaiters.shift();
+    if (next) next();
+    else writing = false;
+  }
 }

@@ -88,7 +88,7 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
             }
           : {};
         const next = await api<RoomView | null>(
-          `/api/rooms/${id}${revision ? `?revision=${revision}` : ""}`,
+          `/api/rooms/${id}?${new URLSearchParams({ ...(revision ? {revision:String(revision)} : {}), ...(role === "player" ? {view:"card"} : {}) })}`,
           { headers, signal: current.signal },
         );
         if (stopped) return;
@@ -178,7 +178,7 @@ function QrCode({ url }: { url: string }) {
           width: 280,
           margin: 2,
           errorCorrectionLevel: "M",
-          color: { dark: "#164c3d", light: "#ffffff" },
+          color: { dark: "#202020", light: "#ffffff" },
         }),
       )
       .then((src) => {
@@ -255,7 +255,7 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
       </main>
     );
   return (
-    <div className={`room-app role-${role}`}>
+    <div className={`room-app role-${role} state-${view.status}`}>
       <header className="room-header">
         <Logo light={role === "screen"} />
         <div>
@@ -268,22 +268,7 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
           </Link>
         )}
       </header>
-      <RoomError error={error} refresh={refresh} />
-      <div className={`sync-banner ${connected ? "synced" : "stale"}`}>
-        <span role="status">
-          {connected
-            ? "● 最新の状態を確認済み"
-            : "◷ 再接続中 — 表示は最後に確認できた状態です。操作を停止しています。"}
-        </span>
-        {lastSync && (
-          <span aria-hidden="true">
-            最終同期{" "}
-            {new Date(lastSync).toLocaleTimeString("ja-JP", {
-              timeZone: "Asia/Tokyo",
-            })}
-          </span>
-        )}
-      </div>
+      {!connected&&<div className="sync-banner stale" role="status"><p>再接続中 — 表示は最後に確認できた状態です。操作を停止しています。</p>{error&&<p>{error}</p>}<button onClick={refresh}>接続を再確認</button>{lastSync&&<small>最終同期 {new Date(lastSync).toLocaleTimeString("ja-JP",{timeZone:"Asia/Tokyo"})}</small>}</div>}
       {role === "host" ? (
         <Host
           view={view}
@@ -312,12 +297,12 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
       )}
       {toast && (
         <div className="toast" role="status">
-          ✓ {toast}
+          {toast}
         </div>
       )}
       {role !== "screen" && (
         <div className="room-bottom">
-          いい時間に、いいビンゴを。<span>BINGO ROOM</span>
+          <span>BINGO ROOM</span>
         </div>
       )}
     </div>
@@ -344,6 +329,7 @@ function Host({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [prizeName, setPrizeName] = useState("");
+  const [search,setSearch] = useState("");
   const prizeId = useRef<string | null>(null);
   const mutation = useRef(false);
   const [rolling, setRolling] = useState(false);
@@ -418,6 +404,8 @@ function Host({
     }
   }
   async function downloadCsv() {
+    if(mutation.current || !connected)return;
+    mutation.current=true;setBusy(true);
     try {
       const blob = await apiBlob(`/api/rooms/${view.id}/export`, {
         headers: { Authorization: `Bearer ${hostKey}` },
@@ -432,350 +420,67 @@ function Host({
       setError(
         error instanceof Error ? error.message : "結果を保存できませんでした。",
       );
-    }
+    } finally { mutation.current=false;setBusy(false); }
   }
-  const latest = view.drawn.at(-1);
-  return (
-    <main className="host-main">
-      <div className="dashboard-title">
-        <div>
-          <span className="eyebrow">YOUR EVENT ROOM</span>
-          <h1>{view.title}</h1>
-          <span className={`event-status ${view.status}`}>
-            <span>第{view.gameNumber}ゲーム · </span>
-            {view.status === "lobby"
-              ? "● 参加受付中"
-              : view.status === "playing"
-                ? "● ゲーム進行中・新規受付終了"
-                : "✓ イベント終了"}
-          </span>
-        </div>
-        <div className="dashboard-actions">
-          <button
-            className="button outline small"
-            onClick={() => copy(joinUrl)}
-          >
-            参加URLをコピー ↗
-          </button>
-          <Link
-            href={`/screen/${view.id}`}
-            className="button primary small"
-            target="_blank"
-          >
-            会場スクリーンを開く ↗
-          </Link>
-        </div>
+  const latest=view.drawn.at(-1);
+  const listed=(view.players||[]).filter(player=>player.name.normalize("NFKC").toLocaleLowerCase("ja").includes(search.normalize("NFKC").toLocaleLowerCase("ja")));
+  return <main id="main-content" className="host-main">
+    <div className="dashboard-title">
+      <div><p className="section-label">幹事の進行画面</p><h1>{view.title}</h1>
+        <p className={"event-status "+view.status}>第{view.gameNumber}ゲーム · {view.status==="lobby"?"参加受付中":view.status==="playing"?"進行中・新規受付終了":"終了"}</p>
       </div>
-      <div className="host-save-banner">
-        <span>⌘</span>
-        <div>
-          <b>幹事用リンクを、いま保存しましょう。</b>
-          <p>
-            別の端末で再開するときに必要です。参加者には共有しないでください。
-          </p>
-        </div>
-        <button
-          onClick={() =>
-            copy(`${location.origin}/host/${view.id}#key=${hostKey}`)
-          }
-        >
-          幹事用リンクをコピー ↗
-        </button>
+      <div className="dashboard-actions"><button className="button" onClick={()=>copy(joinUrl)}>参加URLをコピー</button><Link href={"/screen/"+view.id} className="button primary" target="_blank">会場スクリーンを開く</Link></div>
+    </div>
+    {view.status==="lobby"&&<div className="host-save-banner"><p><strong>幹事用リンクを保存してください。</strong><span>別の端末でも進行を再開できます。参加者には共有しないでください。</span></p><button className="text-link" onClick={()=>copy(location.origin+"/host/"+view.id+"#key="+hostKey)}>幹事用リンクをコピー</button></div>}
+    {paymentReturn&&view.plan==="free"&&<div className="notice" role="status">{view.paymentStatus==="failed"?"テスト決済は完了していません。人数制限は解除されていません。":"Stripeのテスト決済結果を確認しています。"}<button onClick={refresh}>確認する</button></div>}
+    {error&&<p className="error" role="alert">{error}</p>}
+    <div className="stats-grid">
+      <div><span>参加者</span><strong>{view.count}<small> / {view.limit}人</small></strong></div>
+      <div><span>抽選済み</span><strong>{view.drawn.length}<small> / 75</small></strong></div>
+      <div><span>ビンゴ</span><strong>{view.winners.length}<small>人</small></strong></div>
+      <div><span>プラン</span><strong className="plan-stat">{view.plan==="event"?"イベント":"無料"}<small>{view.plan==="event"?"テスト決済済み":"30人まで"}</small></strong></div>
+    </div>
+    {view.status==="lobby"&&<Invitation view={view} joinUrl={joinUrl} copy={copy} className="lobby-mobile-invite"/>}
+    <div className="dashboard-grid">
+      <div className="dashboard-left">
+        <section className="draw-panel" aria-label="抽選の操作">
+          <div className="panel-heading"><h2>抽選</h2><span>{view.drawn.length?"第"+view.drawn.length+"回":"開始前"}</span></div>
+          <div className="draw-stage">
+            <span className="draw-kicker">{view.status==="finished"?"このゲームは終了しました":latest?"いま出た番号":"参加者がそろったら開始してください"}</span>
+            <div className="big-number" aria-live="polite" aria-busy={rolling}>{latest||"—"}</div>
+            <div className="draw-history">{view.drawn.length>1?<><span className="history-label">ひとつ前</span>{view.drawn.slice(-6,-1).reverse().map((number,index)=><span key={number} className={index===0?"previous":""}>{number}</span>)}</>:<span className="empty-history">{view.status==="lobby"?"現在 "+view.count+"人が参加しています":"最初の番号です"}</span>}</div>
+            <button className="button draw-button" disabled={busy||!connected||!view.count||view.status==="finished"||view.drawn.length===75} onClick={()=>{
+              if(view.drawn.length===0&&!confirm("参加者は"+view.count+"人です。抽選を始めると新規参加の受付が終了します。開始しますか？"))return;
+              void action({action:"draw",expectedDrawCount:view.drawn.length});
+            }}>{busy&&rolling?"抽選中…":view.drawn.length?"次の番号をひく":"最初の番号をひく"}</button>
+            <small>{view.status==="lobby"?"最初の抽選で新規参加の受付が終了します。":view.drawn.length===75?"75個すべての番号を抽選しました。":"同じ番号は重複して出ません。"}</small>
+          </div>
+          <NumberBoard drawn={view.drawn}/>
+        </section>
+        <section className="panel results-panel">
+          <div className="panel-heading"><h2>当選結果 <span>{view.winners.length}人</span></h2><button className="text-link" onClick={downloadCsv} disabled={!connected||busy}>CSVを保存</button></div>
+          {view.winners.length?<div className="winner-list" role="region" aria-label="当選結果一覧" tabIndex={0}>{view.winners.map(player=><div className="winner-row" key={player.id}><span>{player.rank}位</span><strong>{player.name}</strong><small>{view.prizes.find(prize=>prize.playerId===player.id)?.name||"景品未割り当て"}</small></div>)}</div>:<p className="empty-state">{view.status==="lobby"?"参加者を確認し、全員にカードが届いたら開始してください。":"まだビンゴはいません。そろうと自動で表示されます。"}</p>}
+          <details className="participant-register" open={view.status==="lobby"}>
+            <summary>参加者一覧 <span>{view.count}人</span></summary>
+            <label className="sr-only" htmlFor="participant-search">参加者名で検索</label><input id="participant-search" type="search" placeholder="名前で検索" value={search} onChange={event=>setSearch(event.target.value)}/>
+            {search&&<p className="search-count">{listed.length}人が一致</p>}
+            <div className="players-list" role="region" aria-label="参加者一覧" tabIndex={0}><table className="players-table"><caption className="sr-only">参加者と当選結果</caption><thead><tr><th scope="col">名前</th><th scope="col">順位</th><th scope="col">景品</th></tr></thead><tbody>{listed.map(player=><tr className={"player-row"+(player.bingoAt?" winner":"")} key={player.id}><th scope="row">{player.name}</th><td>{player.rank?String(player.rank)+"位"+(view.winners.filter(w=>w.rank===player.rank).length>1?"（同着）":""):"参加中"}</td><td>{view.prizes.find(prize=>prize.playerId===player.id)?.name||"—"}</td></tr>)}</tbody></table>{!listed.length&&<p className="empty-state">{view.count?"一致する名前はありません。":"まだ参加者はいません。"}</p>}</div>
+          </details>
+        </section>
       </div>
-      {paymentReturn && view.plan === "free" && (
-        <div className="notice" role="status">
-          {view.paymentStatus === "failed"
-            ? "お支払いが完了していません。人数制限は解除されていません。接続を確認し、もう一度お試しください。"
-            : "Stripeの決済結果を確認しています。反映まで少しお待ちください。"}
-          <button onClick={refresh}>確認する</button>
-        </div>
-      )}
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-      {view.status === "lobby" && (
-        <Invitation
-          view={view}
-          joinUrl={joinUrl}
-          copy={copy}
-          className="lobby-mobile-invite"
-        />
-      )}
-      <div className="stats-grid">
-        <div>
-          <span>PARTICIPANTS</span>
-          <strong>
-            {view.count}
-            <small>/ {view.limit}人</small>
-          </strong>
-        </div>
-        <div>
-          <span>NUMBERS DRAWN</span>
-          <strong>
-            {view.drawn.length}
-            <small>/ 75</small>
-          </strong>
-        </div>
-        <div>
-          <span>BINGO!</span>
-          <strong>
-            {view.winners.length}
-            <small>人</small>
-          </strong>
-        </div>
-        <div>
-          <span>ROOM PLAN</span>
-          <strong className="plan-stat">
-            {view.plan === "event" ? "EVENT" : "FREE"}
-            <small>
-              {view.plan === "event" ? "テスト決済済み" : "30人まで無料"}
-            </small>
-          </strong>
-        </div>
-      </div>
-      <div className="dashboard-grid">
-        <div className="dashboard-left">
-          <section className="draw-panel">
-            <div className="panel-heading">
-              <h2>抽選ルーム</h2>
-              <span>
-                {view.drawn.length
-                  ? `第${view.drawn.length}回`
-                  : "READY WHEN YOU ARE"}
-              </span>
-            </div>
-            <div className="draw-stage">
-              <span className="draw-kicker">
-                {view.status === "finished"
-                  ? "THANK YOU FOR PLAYING"
-                  : latest
-                    ? "LUCKY NUMBER"
-                    : "LET’S GET STARTED"}
-              </span>
-              <div
-                aria-live="polite"
-                className={`big-number ${rolling ? "rolling" : ""}`}
-              >
-                {rolling ? "…" : latest || "?"}
-              </div>
-              <div className="draw-history">
-                {view.drawn.length ? (
-                  view.drawn
-                    .slice(-5)
-                    .reverse()
-                    .map((n, i) => (
-                      <span key={n} className={i === 0 ? "current" : ""}>
-                        {n}
-                      </span>
-                    ))
-                ) : (
-                  <span className="empty-history">
-                    みんなが集まったら、はじめましょう。
-                  </span>
-                )}
-              </div>
-              <button
-                className="button draw-button"
-                disabled={
-                  busy ||
-                  !connected ||
-                  !view.count ||
-                  view.status === "finished" ||
-                  view.drawn.length === 75
-                }
-                onClick={() =>
-                  void action({
-                    action: "draw",
-                    expectedDrawCount: view.drawn.length,
-                  })
-                }
-              >
-                {busy && rolling
-                  ? "抽選中…"
-                  : view.drawn.length
-                    ? "次の番号をひく"
-                    : "最初の番号をひく"}
-                <Arrow />
-              </button>
-              <small>最初の抽選で新規参加の受付が終了します。</small>
-            </div>
-            <NumberBoard drawn={view.drawn} />
-          </section>
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>
-                参加者と当選結果 <span>{view.count}</span>
-              </h2>
-              <button
-                className="text-link"
-                onClick={downloadCsv}
-                disabled={!connected || busy}
-              >
-                CSV保存 ↓
-              </button>
-            </div>
-            {view.players?.length ? (
-              <div className="players-list">
-                {view.players.map((p) => (
-                  <div
-                    className={`player-row ${p.bingoAt ? "winner" : ""}`}
-                    key={p.id}
-                  >
-                    <span className="avatar">{p.name.slice(0, 1)}</span>
-                    <b>{p.name}</b>
-                    <span>
-                      {p.rank
-                        ? `${p.rank}位${view.winners.filter((w) => w.rank === p.rank).length > 1 ? "（同着）" : ""}`
-                        : "参加中"}
-                    </span>
-                    <small>
-                      {view.prizes.find((prize) => prize.playerId === p.id)
-                        ?.name || (p.bingoAt ? "BINGO!" : "—")}
-                    </small>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">
-                まだ静かな会場です。
-                <br />
-                QRコードをシェアして、みんなを呼びましょう。
-              </div>
-            )}
-          </section>
-        </div>
-        <aside className="dashboard-right">
-          <Invitation
-            view={view}
-            joinUrl={joinUrl}
-            copy={copy}
-            className={view.status === "lobby" ? "lobby-desktop-invite" : ""}
-          />
-          <section className="panel prizes-panel">
-            <div className="panel-heading">
-              <h2>景品リスト</h2>
-              <span>{view.prizes.length}個</span>
-            </div>
-            <form
-              className="prize-form"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                prizeId.current ??= crypto.randomUUID();
-                if (
-                  await action({
-                    action: "prize",
-                    name: prizeName,
-                    prizeId: prizeId.current,
-                  })
-                ) {
-                  setPrizeName("");
-                  prizeId.current = null;
-                }
-              }}
-            >
-              <label className="sr-only" htmlFor="prize-name">
-                景品名
-              </label>
-              <input
-                id="prize-name"
-                placeholder="例：コーヒーギフト"
-                maxLength={40}
-                required
-                value={prizeName}
-                onChange={(e) => {
-                  setPrizeName(e.target.value);
-                  prizeId.current = null;
-                }}
-              />
-              <button
-                className="button primary"
-                disabled={busy || !connected}
-                aria-label="景品を追加"
-              >
-                ＋
-              </button>
-            </form>
-            {view.prizes.length ? (
-              view.prizes.map((prize, i) => (
-                <PrizeRow
-                  key={prize.id}
-                  prize={prize}
-                  view={view}
-                  index={i}
-                  busy={busy || !connected}
-                  action={action}
-                />
-              ))
-            ) : (
-              <p className="empty-state compact">
-                景品を登録すると、
-                <br />
-                当選者への割り当てができます。
-              </p>
-            )}
-          </section>
-          {view.plan === "free" && (
-            <section className="upgrade-panel">
-              <span className="eyebrow">MORE PEOPLE, MORE FUN.</span>
-              <h3>31人以上で集まるなら。</h3>
-              <p>
-                最大300人・30日間
-                <br />
-                1イベント <b>¥2,980</b>
-                <small>（税込）</small>
-              </p>
-              <button
-                className="button primary wide small"
-                disabled={busy || !connected || !view.paymentReady}
-                onClick={upgrade}
-              >
-                {view.paymentReady
-                  ? "sandboxでテスト決済 ↗"
-                  : "テスト決済の受付準備中"}
-              </button>
-              <small>現在はテスト決済のみ。実際の請求はありません。</small>
-            </section>
-          )}
-          <section className="room-tools">
-            <span className="eyebrow">EVENT TOOLS</span>
-            <Link href={`/host/${view.id}/print`} target="_blank">
-              参加済みカードを印刷 ↗
-            </Link>
-            <button
-              onClick={() => {
-                if (
-                  confirm(
-                    "抽選結果と景品の割り当てをリセットします。参加者のカードは維持されます。よろしいですか？",
-                  )
-                )
-                  void action({ action: "reset" });
-              }}
-              disabled={busy || !connected}
-            >
-              リハーサル・次のゲームへ ↻
-            </button>
-            <button
-              onClick={() => {
-                if (confirm("このゲームを終了します。結果は保存されます。"))
-                  void action({ action: "finish" });
-              }}
-              disabled={busy || !connected || view.status === "finished"}
-            >
-              ゲームを終了する
-            </button>
-            <small>
-              利用期限：
-              {new Date(view.expiresAt).toLocaleDateString("ja-JP", {
-                timeZone: "Asia/Tokyo",
-              })}
-            </small>
-          </section>
-        </aside>
-      </div>
-    </main>
-  );
+      <aside className="dashboard-right">
+        {view.status==="lobby"?<Invitation view={view} joinUrl={joinUrl} copy={copy} className="lobby-desktop-invite"/>:<details className="card-return"><summary>参加URL・復帰用QR</summary><Invitation view={view} joinUrl={joinUrl} copy={copy}/></details>}
+        <section className="panel prizes-panel"><div className="panel-heading"><h2>景品</h2><span>{view.prizes.length}個</span></div>
+          <form className="prize-form" onSubmit={async event=>{event.preventDefault();prizeId.current??=crypto.randomUUID();if(await action({action:"prize",name:prizeName,prizeId:prizeId.current})){setPrizeName("");prizeId.current=null;}}}>
+            <label className="sr-only" htmlFor="prize-name">景品名</label><input id="prize-name" placeholder="例：コーヒーギフト" maxLength={40} required value={prizeName} onChange={event=>{setPrizeName(event.target.value);prizeId.current=null;}}/><button className="button primary" disabled={busy||!connected} aria-label="景品を追加">追加</button>
+          </form>
+          {view.prizes.length?view.prizes.map((prize,index)=><PrizeRow key={prize.id} prize={prize} view={view} index={index} busy={busy||!connected} action={action}/>):<p className="empty-state compact">景品名を登録すると、ビンゴになった人へ割り当てられます。</p>}
+        </section>
+        {view.plan==="free"&&view.status==="lobby"&&<section className="upgrade-panel"><h2>31人以上の開催</h2><p>最大300人・30日間 <strong>2,980円</strong><small>税込／1イベント</small></p><button className="button wide" disabled={busy||!connected||!view.paymentReady} onClick={upgrade}>{view.paymentReady?"sandboxでテスト決済":"テスト決済の受付準備中"}</button><small>現在はテスト決済のみ。実際の請求はありません。</small></section>}
+        <details className="room-tools"><summary>保存・イベント設定</summary><button onClick={()=>copy(location.origin+"/host/"+view.id+"#key="+hostKey)}>幹事用リンクをコピー</button><Link href={"/host/"+view.id+"/print"} target="_blank">参加済みカードを印刷</Link><button disabled={busy||!connected} onClick={()=>{if(confirm("抽選結果と景品の割り当てをリセットします。参加者のカードは維持されます。よろしいですか？"))void action({action:"reset"});}}>リハーサル・次のゲームへ ↻</button><button className="danger-action" disabled={busy||!connected||view.status==="finished"} onClick={()=>{if(confirm("このゲームを終了します。結果は保存されます。"))void action({action:"finish"});}}>ゲームを終了する</button><small>利用期限：{new Date(view.expiresAt).toLocaleDateString("ja-JP",{timeZone:"Asia/Tokyo"})}</small></details>
+      </aside>
+    </div>
+  </main>;
 }
 
 function Invitation({
@@ -795,7 +500,7 @@ function Invitation({
         <h2>
           {view.status === "lobby" ? "参加者を招待" : "新規受付は終了しました"}
         </h2>
-        <span>{view.status === "lobby" ? "SCAN & JOIN" : "YOUR CARD"}</span>
+        
       </div>
       <QrCode url={joinUrl} />
       <b className="join-code-label">{view.id}</b>
@@ -818,7 +523,7 @@ function Invitation({
         className="button outline wide small"
         onClick={() => copy(joinUrl)}
       >
-        参加URLをコピー ↗
+        参加URLをコピー
       </button>
     </section>
   );
@@ -939,14 +644,13 @@ function Participant({
   const me = view.me;
   if (!me)
     return (
-      <main className="participant-entry">
-        <div className="entry-art">✳</div>
-        <span className="eyebrow">YOU’RE INVITED!</span>
+      <main id="main-content" className="participant-entry">
+        <p className="section-label">ビンゴに参加</p>
         <h1>{view.title}</h1>
         <p>
-          いつもの名前で、気軽に参加。
+          ニックネームを入力してください。
           <br />
-          あなた専用のビンゴカードが届きます。
+          参加すると、この画面にカードが表示されます。
         </p>
         {view.status === "lobby" ? (
           <form
@@ -1028,130 +732,34 @@ function Participant({
     );
   const status = cardStatus(me.card, view.drawn);
   const prize = view.prizes.find((p) => p.playerId === me.id);
-  return (
-    <main className={`participant-main ${status.bingo ? "has-bingo" : ""}`}>
-      <div className="participant-greeting">
-        <span className="eyebrow">YOUR LUCKY CARD</span>
-        <h1>
-          {me.name}
-          <small>さんのカード</small>
-        </h1>
-      </div>
-      <div
-        className={`card-status ${status.bingo ? "bingo-status" : status.reach ? "reach-status" : ""}`}
-        role="status"
-      >
-        {view.status === "finished"
-          ? "THANK YOU! また遊びましょう。"
-          : status.bingo
-            ? `✦ BINGO! おめでとう！ ${me.rank}位 ✦`
-            : status.reach
-              ? `✦ リーチ！あとひとつ。`
-              : view.status === "lobby"
-                ? "みんなが集まるまで、もう少し。"
-                : "次の番号は、あなたのラッキーナンバーかも。"}
-      </div>
-      <BingoCard card={me.card} drawn={view.drawn} />
-      {playerKey && (
-        <button
-          className="button outline wide recovery-button"
-          onClick={() =>
-            copy(`${location.origin}/join/${view.id}#card=${playerKey}`)
-          }
-        >
-          カードの復帰リンクを保存 ↗
-        </button>
-      )}
-      {playerKey && (
-        <p className="recovery-help">
-          このリンクはあなただけのものです。他の人に共有しないでください。
-        </p>
-      )}
-      {prize && (
-        <div className="won-prize">
-          <span>YOUR GIFT</span>
-          <h2>🎁 {prize.name}</h2>
-          <p>幹事に名前を伝えて、景品を受け取ってください。</p>
-        </div>
-      )}
-      <div className="participant-latest">
-        <span>いま出た番号</span>
-        <strong aria-live="polite">{view.drawn.at(-1) || "—"}</strong>
-        <span>{view.drawn.length} / 75 回目</span>
-      </div>
-      <p className="participant-help">
-        カードは自動で開きます。ビンゴの申告も不要です。
-        <br />
-        通信が切れてもカードを閉じず、回線の復旧をお待ちください。
-      </p>
-      <details className="drawn-details">
-        <summary>これまでに出た番号を見る</summary>
-        <NumberBoard drawn={view.drawn} />
-      </details>
-    </main>
-  );
+  return <main id="main-content" className={"participant-main"+(status.bingo?" has-bingo":"")}>
+    <div className="participant-greeting"><h1>{me.name}<small>さんのカード</small></h1></div>
+    <div className="participant-latest"><span>{view.status==="lobby"?"開始を待っています":"いま出た番号"}</span><strong aria-live="polite">{view.drawn.at(-1)||"—"}</strong><span>{view.drawn.length} / 75 回目</span></div>
+    <div className={"card-status"+(status.bingo?" bingo-status":status.reach?" reach-status":"")} role="status">{view.status==="finished"?"このゲームは終了しました。":status.bingo?"ビンゴ！ "+me.rank+"位":status.reach?"リーチ！ あと1つ":view.status==="lobby"?"抽選が始まるまで、そのままお待ちください。":""}</div>
+    <BingoCard card={me.card} drawn={view.drawn}/>
+    <p className="participant-help">数字は自動で開きます。ビンゴの申告操作は不要です。</p>
+    {prize&&<div className="won-prize"><span>あなたの景品</span><h2>{prize.name}</h2><p>幹事に名前を伝えて、景品を受け取ってください。</p></div>}
+    <details className="drawn-details"><summary>これまでに出た番号を見る</summary><NumberBoard drawn={view.drawn}/></details>
+    {playerKey&&<details className="card-recovery"><summary>カードの復帰リンク</summary><p>このリンクを保存すると、別の端末でも同じカードに戻れます。他の人には共有しないでください。</p><button className="button wide" onClick={()=>copy(location.origin+"/join/"+view.id+"#card="+playerKey)}>このカードの復帰リンクをコピー</button></details>}
+  </main>;
 }
 
-function Screen({ view, joinUrl }: { view: RoomView; joinUrl: string }) {
-  return (
-    <main className="screen-main">
-      <div className="screen-title">
-        <span className="eyebrow">LET THE GOOD TIMES ROLL</span>
-        <h1>{view.title}</h1>
-      </div>
-      <div className="screen-layout">
-        <section className="screen-draw">
-          <span>
-            {view.status === "lobby"
-              ? "みんな、準備はいい？"
-              : view.status === "finished"
-                ? "THANK YOU FOR PLAYING!"
-                : `第${view.drawn.length}回 LUCKY NUMBER`}
-          </span>
-          <strong key={view.drawn.length} aria-live="polite">
-            {view.drawn.at(-1) || "?"}
-          </strong>
-          <div className="screen-recent">
-            {view.drawn
-              .slice(-6)
-              .reverse()
-              .map((n) => (
-                <b key={n}>{n}</b>
-              ))}
-          </div>
-        </section>
-        <aside className="screen-join">
-          <QrCode url={joinUrl} />
-          <b>{view.id}</b>
-          <span>
-            {view.status === "lobby"
-              ? "QRコードから参加"
-              : "参加済みカードへ戻る"}
-          </span>
-          <small>
-            {view.count}人が参加中 · ビンゴ {view.winners.length}人
-          </small>
-          {view.status !== "lobby" && (
-            <small>新規参加の受付は終了しています</small>
-          )}
-        </aside>
-      </div>
-      <NumberBoard drawn={view.drawn} />
-      {view.winners.length > 0 && (
-        <section className="screen-winners">
-          <span>BINGO!</span>
-          {view.winners.map((p) => (
-            <b key={p.id}>
-              {p.rank}位 {p.name}
-              <small>
-                {view.prizes.find((prize) => prize.playerId === p.id)?.name}
-              </small>
-            </b>
-          ))}
-        </section>
-      )}
-    </main>
-  );
+function Screen({view,joinUrl}:{view:RoomView;joinUrl:string}) {
+  const [canFullscreen,setCanFullscreen]=useState(false);
+  const [fullscreen,setFullscreen]=useState(false);
+  useEffect(()=>{setCanFullscreen(Boolean(document.fullscreenEnabled));const changed=()=>setFullscreen(Boolean(document.fullscreenElement));document.addEventListener("fullscreenchange",changed);return()=>document.removeEventListener("fullscreenchange",changed);},[]);
+  const newest=view.winners.filter(player=>player.bingoAt===view.drawn.length);
+  const shown=newest.length?newest.slice(0,6):view.winners.slice(-6);
+  return <main id="main-content" className={"screen-main"+(view.status==="lobby"?" screen-lobby":"")}>
+    <div className="screen-title"><h1>{view.title}</h1><div className="screen-controls">{view.status!=="lobby"&&<details className="screen-return"><summary>カードに戻る</summary><div><QrCode url={joinUrl}/><b>{view.id}</b><p>参加したときと同じブラウザで開いてください。</p></div></details>}{canFullscreen&&<button className="screen-fullscreen" onClick={()=>{const task=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();task.catch(()=>window.alert("全画面に切り替えられませんでした。ブラウザの全画面機能をお使いください。"));}}>{fullscreen?"全画面を終了":"全画面表示"}</button>}</div></div>
+    {view.status==="lobby"?<div className="screen-waiting"><div><h2>QRからカードを受け取ってください。</h2><p>ニックネームを入力すると参加できます。</p><p className="screen-count"><strong>{view.count}</strong>人が参加済み</p><p>全員がそろったら、幹事が抽選を始めます。</p></div><aside className="screen-join"><QrCode url={joinUrl}/><b>{view.id}</b><span>参加コードの入力先<br/><b className="screen-address">{joinUrl.split("/join/")[0]}</b></span></aside></div>:<>
+      <div className="screen-stage"><section className="screen-draw"><span>{view.status==="finished"?"ゲーム終了":"いま出た番号 · 第"+view.drawn.length+"回"}</span><strong key={view.drawn.length} aria-live="polite">{view.drawn.at(-1)||"—"}</strong><div className="screen-recent">{view.drawn.length>1&&<span>ひとつ前</span>}{view.drawn.slice(-6,-1).reverse().map(number=><b key={number}>{number}</b>)}</div></section>
+      <NumberBoard drawn={view.drawn}/></div>
+      <div className="screen-score"><span>抽選済み {view.drawn.length} / 75</span><span>ビンゴ {view.winners.length}人</span><span>新規参加の受付は終了しています</span></div>
+      {shown.length>0&&<section className="screen-winners" aria-label="直近の当選者"><h2>{newest.length?"この番号で "+newest.length+"人がビンゴ":"直近のビンゴ"}</h2><div>{shown.map(player=><p key={player.id}><b>{player.rank}位 {player.name}</b><span>{view.prizes.find(prize=>prize.playerId===player.id)?.name}</span></p>)}</div>{newest.length>6&&<p>ほか{newest.length-6}人。同じ抽選回でのビンゴは同順位です。</p>}</section>}
+
+    </>}
+  </main>;
 }
 
 export function PrintCards({ id }: { id: string }) {
@@ -1180,7 +788,7 @@ export function PrintCards({ id }: { id: string }) {
     };
   }, [id, key]);
   return (
-    <main className="print-page">
+    <main id="main-content" className="print-page">
       <div className="print-header">
         <Logo />
         <h1>参加済みカードのバックアップ</h1>

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getView, printableCards } from "@/lib/service";
+import { authorizeHost, getView, invalidateRoom, printableCards } from "@/lib/service";
 import { bearer, failure, noStore } from "@/lib/http";
 import { csvCell } from "@/lib/game";
 export const runtime = "nodejs";
@@ -20,6 +20,8 @@ export async function GET(
         { error: "幹事用リンクから開いてください。" },
         { status: 401, headers: noStore },
       );
+    await authorizeHost(id, secret);
+    invalidateRoom(id);
     const room = await getView(id, secret);
     const rows = [
       ["名前", "順位", "ビンゴした抽選回", "景品"],

@@ -153,6 +153,7 @@ export async function createRoom(
       args: [id, hash(secret), name, now, now + 7 * 86400000],
     });
   });
+  invalidateRoom(id);
   return { id, hostToken: secret };
 }
 
@@ -165,7 +166,7 @@ export async function joinRoom(
   if (joinKey !== undefined && !validSecret(joinKey))
     throw new AppError("参加情報を確認してください。");
   const secret = joinKey || token();
-  return writeTransaction(async (tx) => {
+  const result = await writeTransaction(async (tx) => {
     const row = await readRoom(tx, id);
     for (const candidate of [joinKey, existing])
       if (candidate && validSecret(candidate)) {
@@ -215,6 +216,70 @@ export async function joinRoom(
     });
     return { secret };
   });
+  invalidateRoom(id);
+  return result;
+}
+
+// The cache contains private server data. Only getView's explicit projection may leave the server.
+type Member = { id: string; name: string; auth_hash: string; bingo_at: number | null; card: string };
+type Snapshot = { row: Row; room: Room; members: Member[]; players: Player[]; winners: Player[]; byAuth: Map<string, number> };
+type CachedRoom = { snapshot?: Snapshot; freshUntil: number; pending?: Promise<Snapshot> };
+const roomCache = new Map<string, CachedRoom>();
+
+export function invalidateRoom(id: string) {
+  roomCache.delete(id);
+}
+async function roomSnapshot(store: Awaited<ReturnType<typeof db>>, id: string, knownRevision?: number): Promise<Snapshot> {
+  let entry = roomCache.get(id);
+  if (!entry) {
+    entry = { freshUntil: 0 };
+    roomCache.set(id, entry);
+    if (roomCache.size > 200) roomCache.delete(roomCache.keys().next().value!);
+  } else {
+    roomCache.delete(id);
+    roomCache.set(id, entry);
+  }
+  if (entry.snapshot && entry.freshUntil > Date.now() && entry.snapshot.room.expiresAt > Date.now()
+    && (knownRevision === undefined || entry.snapshot.room.revision >= knownRevision)) return entry.snapshot;
+  if (entry.pending) return entry.pending;
+  const current = entry, previous = entry.snapshot, started = Date.now();
+  current.pending = (async () => {
+    // A single SQL statement keeps numbers, ranking and membership in one consistent snapshot.
+    const result = await store.execute({
+      sql: `SELECT rooms.*, CASE WHEN revision=? THEN NULL ELSE (
+        SELECT json_group_array(json_object('id',id,'name',name,'auth_hash',auth_hash,'bingo_at',bingo_at,'card',card))
+        FROM (SELECT id,name,auth_hash,bingo_at,card FROM players WHERE room_id=rooms.id
+          ORDER BY bingo_at IS NULL,bingo_at,joined_at,id)
+      ) END AS members FROM rooms WHERE id=?`,
+      args: [previous?.room.revision ?? null, id],
+    });
+    const row = checkedRoom(result.rows[0]), room = roomFrom(row);
+    let snapshot: Snapshot;
+    if (previous && row.members === null) snapshot = { ...previous, row, room };
+    else {
+      const members = JSON.parse(String(row.members)) as Member[];
+      let rank = 0, previousBingo: number | null = null;
+      const players: Player[] = members.map((member, index) => {
+        const bingoAt = member.bingo_at === null ? null : Number(member.bingo_at);
+        if (bingoAt !== null && bingoAt !== previousBingo) rank = index + 1;
+        previousBingo = bingoAt;
+        return { id: member.id, name: member.name, bingoAt, rank: bingoAt === null ? null : rank };
+      });
+      snapshot = { row, room, members, players, winners: players.filter(player => player.bingoAt !== null),
+        byAuth: new Map(members.map((member, index) => [member.auth_hash, index])) };
+    }
+    // A read started before a write must never repopulate an invalidated cache entry.
+    if (roomCache.get(id) === current) {
+      current.snapshot = snapshot;
+      current.freshUntil = started + 500;
+    }
+    return snapshot;
+  })();
+  try { return await current.pending; }
+  catch (error) {
+    if (roomCache.get(id) === current) roomCache.delete(id);
+    throw error;
+  } finally { current.pending = undefined; }
 }
 
 export async function getView(
@@ -222,82 +287,33 @@ export async function getView(
   hostSecret: string | null,
   playerSecret?: string,
   revision?: number,
+  cardOnly = false,
 ): Promise<RoomView | null> {
   validRoomId(id);
   const store = await db();
-  const playerHash = playerSecret ? hash(playerSecret) : "";
-  // One statement keeps the room and cards in the same snapshot, without a transaction per poll.
-  const result = await store.execute({
-    sql: `
-    SELECT rooms.*,
-      CASE WHEN revision=? THEN NULL ELSE
-        (SELECT COUNT(*) FROM players WHERE room_id=rooms.id) END AS player_count,
-      CASE WHEN revision=? THEN NULL ELSE (
-        SELECT json_group_array(json_object('id',id,'name',name,'bingo_at',bingo_at,'card',card))
-        FROM (SELECT id,name,bingo_at,CASE WHEN auth_hash=? THEN card ELSE NULL END AS card
-          FROM players WHERE room_id=rooms.id AND (bingo_at IS NOT NULL OR auth_hash=? OR ?=1)
-          ORDER BY bingo_at IS NULL,bingo_at,joined_at,id)
-      ) END AS members
-    FROM rooms WHERE id=?`,
-    args: [
-      revision ?? null,
-      revision ?? null,
-      playerHash,
-      playerHash,
-      hostSecret ? 1 : 0,
-      id,
-    ],
-  });
-  const row = checkedRoom(result.rows[0]);
+  const { row, room, members, players, winners, byAuth } = await roomSnapshot(store, id, revision);
   if (hostSecret) checkHost(row, hostSecret);
-  if (revision === Number(row.revision)) return null;
-  const room = roomFrom(row);
-  const rows = JSON.parse(String(row.members)) as {
-    id: string;
-    name: string;
-    bingo_at: number | null;
-    card: string | null;
-  }[];
-  let rank = 0,
-    previousBingo: number | null = null;
-  const players: Player[] = rows.map((p, index) => {
-    const bingoAt = p.bingo_at === null ? null : Number(p.bingo_at);
-    if (bingoAt !== null && bingoAt !== previousBingo) rank = index + 1;
-    previousBingo = bingoAt;
-    return {
-      id: String(p.id),
-      name: String(p.name),
-      bingoAt,
-      rank: bingoAt === null ? null : rank,
-    };
-  });
+  if (revision === room.revision) return null;
   const view: RoomView = {
     ...room,
-    count: Number(row.player_count),
+    drawn: [...room.drawn],
+    prizes: room.prizes.map(prize => ({ ...prize })),
+    count: players.length,
     limit: room.plan === "event" ? PAID_LIMIT : FREE_LIMIT,
-    winners: players.filter((p) => p.bingoAt !== null),
+    winners: cardOnly && !hostSecret ? [] : winners.map(player => ({ ...player })),
   };
-  if (hostSecret) view.players = players;
   if (hostSecret) {
-    view.paymentStatus =
-      room.plan === "event"
-        ? "paid"
-        : String(
-            (
-              await store.execute({
-                sql: "SELECT status FROM checkout_orders WHERE room_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-                args: [id],
-              })
-            ).rows[0]?.status || "none",
-          );
+    view.players = players.map(player => ({ ...player }));
+    view.paymentStatus = room.plan === "event" ? "paid" : String(
+      (await store.execute({
+        sql: "SELECT status FROM checkout_orders WHERE room_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        args: [id],
+      })).rows[0]?.status || "none",
+    );
   }
   if (playerSecret) {
-    const index = rows.findIndex((p) => p.card !== null);
-    if (index !== -1)
-      view.me = {
-        ...players[index],
-        card: JSON.parse(String(rows[index].card)) as Card,
-      };
+    const index = byAuth.get(hash(playerSecret));
+    if (index !== undefined) view.me = { ...players[index], card: JSON.parse(members[index].card) as Card };
   }
   return view;
 }
@@ -432,6 +448,7 @@ export async function hostAction(
       ],
     });
   });
+  invalidateRoom(id);
 }
 
 export async function printableCards(id: string, secret: string | null) {

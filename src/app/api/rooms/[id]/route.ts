@@ -16,6 +16,7 @@ export async function GET(
       secret,
       playerCredential(request, id),
       revision === null ? undefined : Number(revision),
+      request.nextUrl.searchParams.get("view") === "card",
     );
     if (!view) return new NextResponse(null, { status: 204, headers: noStore });
     if (secret) view.paymentReady = paymentReady();

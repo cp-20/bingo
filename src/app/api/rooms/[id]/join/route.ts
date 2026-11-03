@@ -18,7 +18,7 @@ export async function POST(
       request.cookies.get(`bingo_${id}`)?.value,
       data.joinKey,
     );
-    const room = await getView(id, null, result.secret);
+    const room = await getView(id, null, result.secret, undefined, true);
     const response = NextResponse.json(
       { room, playerKey: result.secret },
       { headers: noStore },

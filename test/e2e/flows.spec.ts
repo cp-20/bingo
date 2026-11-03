@@ -78,6 +78,7 @@ test("landing works at 320px and desktop; dialog restores keyboard focus", async
     path: "test-results/landing-mobile.png",
     fullPage: true,
   });
+  await accessible(page);
   expect(errors).toEqual([]);
 });
 test("host and mobile guest create, join, draw, recover after storage loss, and reconnect", async ({
@@ -103,7 +104,9 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     viewport: { width: 390, height: 844 },
   });
   const guest = await guestContext.newPage();
-  await guest.goto(`http://127.0.0.1:3100/join/${event.id}`);
+  await guest.goto("http://127.0.0.1:3100/");
+  await guest.getByLabel("参加コード",{exact:true}).fill(event.id.slice(0,4).toLowerCase()+" "+event.id.slice(4).toLowerCase());
+  await guest.getByRole("button",{name:"参加する",exact:true}).click();
   await guest.getByLabel("会場で表示するニックネーム").fill("ビンゴ太郎");
   await guest.getByRole("button", { name: "ビンゴに参加する" }).click();
   await expect(
@@ -121,15 +124,17 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   await page.bringToFront();
   const draw = page.getByRole("button", { name: "最初の番号をひく" });
   await expect(draw).toBeEnabled();
+  page.once("dialog", dialog => dialog.dismiss());
+  await draw.click();
+  await expect(draw).toBeEnabled();
+  expect((await (await request.get(`/api/rooms/${event.id}`)).json()).drawn).toHaveLength(0);
+  page.once("dialog", dialog => dialog.accept());
   await draw.click();
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
   ).toBeEnabled();
-  await expect(
-    page
-      .getByRole("heading", { name: "新規受付は終了しました" })
-      .filter({ visible: true }),
-  ).toBeVisible();
+  await expect(page.locator(".card-return")).not.toHaveAttribute("open", "");
+  await expect(page.getByRole("heading", { name: "新規受付は終了しました" })).toBeHidden();
   await page.context().setOffline(true);
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
@@ -145,6 +150,12 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     path: "test-results/host-desktop.png",
     fullPage: true,
   });
+  const drawBounds=await page.getByRole("button",{name:"次の番号をひく"}).boundingBox();
+  expect(drawBounds!.y+drawBounds!.height).toBeLessThanOrEqual(800);
+  await page.setViewportSize({width:1280,height:720});
+  const shortBounds=await page.getByRole("button",{name:"次の番号をひく"}).boundingBox();
+  expect(shortBounds!.y+shortBounds!.height).toBeLessThanOrEqual(720);
+  await page.setViewportSize({width:1280,height:800});
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
   await page.screenshot({
@@ -157,6 +168,15 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   );
   await accessible(guest);
   await noOverflow(guest);
+  for (const width of [320,390]) {
+    await guest.setViewportSize({width,height:800});
+    await expect(guest.getByRole("cell")).toHaveCount(25);
+    const cardBounds = await guest.getByRole("table").boundingBox();
+    const callBounds = await guest.locator(".participant-latest").boundingBox();
+    expect(callBounds!.y + callBounds!.height).toBeLessThan(cardBounds!.y);
+    expect(cardBounds!.y + cardBounds!.height).toBeLessThanOrEqual(800);
+    await noOverflow(guest);
+  }
   await guest.screenshot({
     path: "test-results/card-mobile.png",
     fullPage: true,
@@ -211,6 +231,7 @@ test("projector and print views are readable and do not expose host credentials"
     path: "test-results/screen-desktop.png",
     fullPage: true,
   });
+  await expect(page.locator(".screen-address")).toHaveText("http://127.0.0.1:3100");
   expect(await page.content()).not.toContain(event.hostToken);
   const joined = await request.post(`/api/rooms/${event.id}/join`, {
     headers: { Origin: "http://127.0.0.1:3100" },
@@ -272,7 +293,7 @@ test("300 participants can poll at the planned rate while the host draws", async
         inFlight++;
         pending.push(
           fetch(
-            `http://127.0.0.1:3100/api/rooms/${event.id}${revisions[client] ? `?revision=${revisions[client]}` : ""}`,
+            `http://127.0.0.1:3100/api/rooms/${event.id}?view=card${revisions[client] ? `&revision=${revisions[client]}` : ""}`,
             {
               headers: { "X-Player-Key": keys[client] },
               signal: AbortSignal.timeout(5000),
@@ -282,6 +303,7 @@ test("300 participants can poll at the planned rate while the host draws", async
               if (response.status === 200) {
                 const view = await response.json();
                 expect(view.me.name).toBe(`Guest ${client}`);
+                expect(view.winners).toEqual([]);
                 revisions[client] = view.revision;
               } else if (response.status !== 204) failures++;
               timings.push(performance.now() - begin);
@@ -325,4 +347,83 @@ test("300 participants can poll at the planned rate while the host draws", async
   } finally {
     store.close();
   }
+});
+
+test("a full venue keeps the called number visible and lets the host find long names", async ({page,request}) => {
+  const event = await room(request, "営業企画部と開発推進部の合同忘年会・年末感謝ビンゴ大会2026・第十五回東京会場");
+  const store = createClient({url:process.env.BINGO_QA_DATABASE_URL!});
+  try {
+    await store.batch([
+      {sql:"UPDATE rooms SET plan='event',status='playing',drawn=?,revision=revision+1 WHERE id=?",args:[JSON.stringify(Array.from({length:75},(_,i)=>i+1)),event.id]},
+      ...Array.from({length:300},(_,i)=>({
+        sql:"INSERT INTO players(id,room_id,auth_hash,name,name_key,card,bingo_at,joined_at) VALUES(?,?,?,?,?,?,?,?)",
+        args:[randomUUID(),event.id,hash(randomBytes(32).toString("base64url")),
+          "営業企画チーム・ビンゴの参加者番号"+String(i).padStart(3,"0"),"guest-"+i,JSON.stringify(makeCard()),75,Date.now()+i]
+      }))
+    ],"write");
+  } finally { store.close(); }
+  await page.setViewportSize({width:1280,height:800});
+  await page.goto("/screen/"+event.id);
+  await expect(page.locator(".screen-draw>strong")).toHaveText("75");
+  await expect(page.locator(".screen-winners")).toContainText("300人がビンゴ");
+  await expect(page.locator(".screen-winners b")).toHaveCount(6);
+  await expect(page.locator(".number-band>div>span")).toHaveCount(75);
+  await expect(page.getByAltText("イベント参加用QRコード")).toBeHidden();
+  for (const height of [720,800,1080]) {
+    await page.setViewportSize({width:1280,height});
+    const bounds=await page.locator(".number-board").boundingBox();
+    expect(bounds!.y+bounds!.height).toBeLessThanOrEqual(height);
+    const winnerBounds=await page.locator(".screen-winners").boundingBox();
+    expect(winnerBounds!.y+winnerBounds!.height).toBeLessThanOrEqual(height);
+    await noOverflow(page);
+  }
+  await page.setViewportSize({width:1280,height:800});
+  await accessible(page);
+  await page.screenshot({path:"test-results/screen-playing.png",fullPage:true});
+  await page.goto("/host/"+event.id+"#key="+event.hostToken);
+  await expect(page.locator(".big-number")).toHaveText("75");
+  await page.locator(".participant-register>summary").click();
+  await page.getByLabel("参加者名で検索").fill("299");
+  await expect(page.locator(".player-row")).toHaveCount(1);
+  await expect(page.locator(".player-row")).toContainText("299");
+  await page.setViewportSize({width:320,height:800});
+  await noOverflow(page);
+  await accessible(page);
+});
+
+test("reach, bingo and prize states keep a long-named guest's full card readable", async ({page,request}) => {
+  const event=await room(request,"スマホでの景品受け取り");
+  const key=randomBytes(32).toString("base64url"), playerId=randomUUID();
+  const card=[7,19,34,49,65,11,22,38,52,70,3,27,0,55,62,14,16,41,47,73,9,24,43,58,68];
+  const drawn=card.slice(0,4);
+  const store=createClient({url:process.env.BINGO_QA_DATABASE_URL!});
+  try {
+    await store.batch([
+      {sql:"UPDATE rooms SET status='playing',drawn=?,revision=revision+1 WHERE id=?",args:[JSON.stringify(drawn),event.id]},
+      {sql:"INSERT INTO players(id,room_id,auth_hash,name,name_key,card,joined_at) VALUES(?,?,?,?,?,?,?)",
+        args:[playerId,event.id,hash(key),"営業企画チーム・ビンゴの参加者番号123","long-name",JSON.stringify(card),Date.now()]}
+    ],"write");
+    await page.setViewportSize({width:390,height:800});
+    await page.goto("/join/"+event.id+"#card="+key);
+    await expect(page.getByRole("status")).toHaveText("リーチ！ あと1つ");
+    await expect(page.locator(".card-numbers .marked")).toHaveCount(4);
+    await accessible(page);
+    await noOverflow(page);
+    drawn.push(card[4]);
+    await store.batch([
+      {sql:"UPDATE rooms SET drawn=?,prizes=?,revision=revision+1 WHERE id=?",args:[JSON.stringify(drawn),JSON.stringify([{id:randomUUID(),name:"コーヒーギフト",playerId}]),event.id]},
+      {sql:"UPDATE players SET bingo_at=5 WHERE id=?",args:[playerId]}
+    ],"write");
+    await expect(page.getByRole("status")).toHaveText("ビンゴ！ 1位");
+    await expect(page.locator(".won-prize")).toContainText("コーヒーギフト");
+    await expect(page.locator(".card-numbers .marked")).toHaveCount(5);
+    for(const width of [320,390]) {
+      await page.setViewportSize({width,height:800});
+      const bounds=await page.getByRole("table",{name:"ビンゴカード"}).boundingBox();
+      expect(bounds!.y+bounds!.height).toBeLessThanOrEqual(800);
+      await noOverflow(page);
+    }
+    await accessible(page);
+    await page.screenshot({path:"test-results/card-bingo.png",fullPage:true});
+  } finally { store.close(); }
 });
