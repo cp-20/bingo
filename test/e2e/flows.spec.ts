@@ -24,12 +24,6 @@ async function room(request: APIRequestContext, title: string) {
   expect(res.status()).toBe(201);
   return res.json() as Promise<{ id: string; hostToken: string }>;
 }
-// Only synthetic fixtures are captured. Auth fragments are removed by the app before capture.
-async function visual(page: Page, name: string) {
-  if (process.env.BINGO_TEST_BROWSER === "webkit") return;
-  const shot = await page.screenshot({ type: "jpeg", quality: 55 });
-  console.log("BINGO_VISUAL:" + name + ":" + shot.toString("base64") + ":END_BINGO_VISUAL");
-}
 async function noOverflow(page: Page) {
   const result = await page.evaluate(() => ({
     fits: document.documentElement.scrollWidth <= innerWidth + 1,
@@ -78,7 +72,6 @@ test("landing works at 320px and desktop; dialog restores keyboard focus", async
     path: "test-results/landing-desktop.png",
     fullPage: true,
   });
-  await visual(page, "landing-desktop");
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
   await page.screenshot({
@@ -86,7 +79,6 @@ test("landing works at 320px and desktop; dialog restores keyboard focus", async
     fullPage: true,
   });
   await accessible(page);
-  await visual(page, "landing-mobile");
   expect(errors).toEqual([]);
 });
 test("host and mobile guest create, join, draw, recover after storage loss, and reconnect", async ({
@@ -164,7 +156,6 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   const shortBounds=await page.getByRole("button",{name:"次の番号をひく"}).boundingBox();
   expect(shortBounds!.y+shortBounds!.height).toBeLessThanOrEqual(720);
   await page.setViewportSize({width:1280,height:800});
-  await visual(page, "host-desktop");
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
   await page.screenshot({
@@ -186,7 +177,6 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     expect(cardBounds!.y + cardBounds!.height).toBeLessThanOrEqual(800);
     await noOverflow(guest);
   }
-  await visual(guest, "card-mobile");
   await guest.screenshot({
     path: "test-results/card-mobile.png",
     fullPage: true,
@@ -241,7 +231,7 @@ test("projector and print views are readable and do not expose host credentials"
     path: "test-results/screen-desktop.png",
     fullPage: true,
   });
-  await visual(page, "screen-lobby");
+  await expect(page.locator(".screen-address")).toHaveText("http://127.0.0.1:3100");
   expect(await page.content()).not.toContain(event.hostToken);
   const joined = await request.post(`/api/rooms/${event.id}/join`, {
     headers: { Origin: "http://127.0.0.1:3100" },
@@ -389,7 +379,6 @@ test("a full venue keeps the called number visible and lets the host find long n
   }
   await page.setViewportSize({width:1280,height:800});
   await accessible(page);
-  await visual(page,"screen-playing");
   await page.screenshot({path:"test-results/screen-playing.png",fullPage:true});
   await page.goto("/host/"+event.id+"#key="+event.hostToken);
   await expect(page.locator(".big-number")).toHaveText("75");
@@ -435,7 +424,6 @@ test("reach, bingo and prize states keep a long-named guest's full card readable
       await noOverflow(page);
     }
     await accessible(page);
-    await visual(page,"card-bingo");
     await page.screenshot({path:"test-results/card-bingo.png",fullPage:true});
   } finally { store.close(); }
 });
