@@ -26,7 +26,7 @@ export default function Landing() {
         <div><strong>参加する方</strong><p>幹事から受け取った8文字のコードを入力。</p></div>
         <form onSubmit={event=>{event.preventDefault();if(!/^[A-Z2-9]{8}$/.test(code)){setJoinError("参加コードは英数字8文字です。");return;}location.assign("/join/"+code);}}>
           <label className="sr-only" htmlFor="join-code">参加コード</label>
-          <input id="join-code" value={code} onChange={event=>{setCode(event.target.value.normalize("NFKC").replace(/\s/g,"").toUpperCase());setJoinError("");}} maxLength={8} autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="参加コード 8文字" aria-describedby={joinError?"join-error":undefined} required/>
+          <input id="join-code" value={code} onChange={event=>{setCode(event.target.value.normalize("NFKC").replace(/\s/g,"").toUpperCase());setJoinError("");}} maxLength={32} autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="参加コード 8文字" aria-describedby={joinError?"join-error":undefined} required/>
           <button className="button">参加する</button>
           {joinError&&<p id="join-error" className="error" role="alert">{joinError}</p>}
         </form>

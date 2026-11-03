@@ -65,7 +65,7 @@ export function BingoCard({
   );
 }
 export function NumberBoard({ drawn }: { drawn: number[] }) {
-  return <div className="number-board" role="group" aria-label="抽選済み番号">
+  return <div className="number-board" role="group" aria-label="抽選番号一覧（1〜75）">
     {["B","I","N","G","O"].map((letter,column)=><div className="number-band" key={letter}>
       <b aria-hidden="true">{letter}</b>
       <div>{Array.from({length:15},(_,i)=>column*15+i+1).map(n=><span key={n} className={(drawn.includes(n)?"hit":"")+(drawn.at(-1)===n?" latest":"")}>{n}<span className="sr-only">{drawn.includes(n)?"、抽選済み":"、未抽選"}</span></span>)}</div>
