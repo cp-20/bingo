@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
 
 const base = new URL(process.env.SMOKE_BASE_URL || "http://127.0.0.1:3000");
@@ -28,10 +29,14 @@ assert.equal(
 for (const path of ["/guide", "/terms", "/privacy", "/legal", "/icon.svg"])
   assert.equal((await fetch(url(path))).status, 200, path);
 assert.equal((await fetch(url("/api/health"))).status, 200);
+assert.equal((await fetch(url("/api/ready"))).status, 200);
 
 const created = await fetch(url("/api/rooms"), {
   method: "POST",
-  headers: json,
+  headers: {
+    ...json,
+    "Idempotency-Key": randomBytes(32).toString("base64url"),
+  },
   body: JSON.stringify({ title: "HTTP integration check" }),
 });
 assert.equal(created.status, 201);
@@ -44,7 +49,11 @@ assert.equal(
     await fetch(url(roomUrl + "/action"), {
       method: "POST",
       headers: json,
-      body: JSON.stringify({ action: "draw", expectedDrawCount: 0 }),
+      body: JSON.stringify({
+        action: "draw",
+        expectedDrawCount: 0,
+        expectedGameNumber: 1,
+      }),
     })
   ).status,
   401,
@@ -53,7 +62,10 @@ assert.equal(
 const joined = await fetch(url(roomUrl + "/join"), {
   method: "POST",
   headers: json,
-  body: JSON.stringify({ name: "Guest" }),
+  body: JSON.stringify({
+    name: "Guest",
+    joinKey: randomBytes(32).toString("base64url"),
+  }),
 });
 assert.equal(joined.status, 200);
 const cookie = joined.headers.get("set-cookie");
@@ -75,7 +87,7 @@ assert.equal(
       headers: { Cookie: cookieHeader },
     })
   ).status,
-  304,
+  204,
 );
 
 const hostHeaders = { ...json, Authorization: `Bearer ${room.hostToken}` };
@@ -84,7 +96,11 @@ const results = await Promise.all(
     fetch(url(roomUrl + "/action"), {
       method: "POST",
       headers: hostHeaders,
-      body: JSON.stringify({ action: "draw", expectedDrawCount: 0 }),
+      body: JSON.stringify({
+        action: "draw",
+        expectedDrawCount: 0,
+        expectedGameNumber: 1,
+      }),
     }),
   ),
 );

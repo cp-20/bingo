@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { hostAction } from "@/lib/service";
+import { getView, hostAction } from "@/lib/service";
+import { paymentReady } from "@/lib/payments";
 import { bearer, body, failure, sameOrigin, noStore } from "@/lib/http";
 export const runtime = "nodejs";
 export async function POST(
@@ -8,12 +9,12 @@ export async function POST(
 ) {
   try {
     sameOrigin(request);
-    await hostAction(
-      (await context.params).id,
-      bearer(request),
-      await body(request),
-    );
-    return NextResponse.json({ ok: true }, { headers: noStore });
+    const { id } = await context.params;
+    const secret = bearer(request);
+    await hostAction(id, secret, await body(request));
+    const room = await getView(id, secret);
+    if (room) room.paymentReady = paymentReady();
+    return NextResponse.json({ room }, { headers: noStore });
   } catch (error) {
     return failure(error);
   }

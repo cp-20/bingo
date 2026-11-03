@@ -3,114 +3,155 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Card, Prize, RoomView } from "@/lib/game";
 import { cardStatus } from "@/lib/card";
+import {
+  api,
+  apiBlob,
+  clientSecret,
+  savedSecret,
+  saveSecret,
+  RequestError,
+} from "@/lib/client";
 import { Arrow, BingoCard, Logo, NumberBoard } from "./ui";
 
 type Role = "host" | "player" | "screen";
-function useHostKey(id: string, enabled: boolean) {
-  const [key, setKey] = useState<string | null | undefined>(
-    enabled ? undefined : null,
-  );
+function useRoomKey(id: string, role: Role) {
+  const [key, setKey] = useState<string | null | undefined>();
   useEffect(() => {
-    if (!enabled) return;
-    const fromLink = new URLSearchParams(location.hash.slice(1)).get("key");
-    if (fromLink && /^[A-Za-z0-9_-]{43}$/.test(fromLink)) {
-      try {
-        localStorage.setItem(`bingo-host-${id}`, fromLink);
-      } catch {
-        /* The recovery link still works for this visit. */
-      }
-      history.replaceState(null, "", location.pathname + location.search);
-      setKey(fromLink);
+    if (role === "screen") {
+      setKey(null);
       return;
     }
-    try {
-      setKey(localStorage.getItem(`bingo-host-${id}`));
-    } catch {
-      setKey(null);
-    }
-  }, [id, enabled]);
-  return key;
+    const parameter = role === "host" ? "key" : "card";
+    const storageKey = `bingo-${role === "host" ? "host" : "player"}-${id}`;
+    const fromLink = new URLSearchParams(location.hash.slice(1)).get(parameter);
+    if (fromLink && /^[A-Za-z0-9_-]{43}$/.test(fromLink)) {
+      saveSecret(storageKey, fromLink);
+      history.replaceState(null, "", location.pathname + location.search);
+      setKey(fromLink);
+    } else setKey(savedSecret(storageKey));
+  }, [id, role]);
+  const remember = useCallback(
+    (secret: string) => {
+      saveSecret(`bingo-player-${id}`, secret);
+      setKey(secret);
+    },
+    [id],
+  );
+  return { key, remember };
 }
 function useRoom(id: string, role: Role, key: string | null | undefined) {
   const [view, setView] = useState<RoomView>();
+  const viewRef = useRef<RoomView | undefined>(undefined);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
+  const [lastSync, setLastSync] = useState<number | null>(null);
   const [generation, setGeneration] = useState(0);
-  const refresh = useCallback(() => setGeneration((n) => n + 1), []);
+  const refresh = useCallback(() => {
+    setConnected(false);
+    setGeneration((n) => n + 1);
+  }, []);
+  const acceptView = useCallback(
+    (next: RoomView) => {
+      if (
+        next.id !== id ||
+        (viewRef.current?.id === id && next.revision < viewRef.current.revision)
+      )
+        return;
+      viewRef.current = next;
+      setView(next);
+      setError("");
+      setConnected(true);
+      setLastSync(Date.now());
+    },
+    [id],
+  );
   useEffect(() => {
-    if (role === "host" && !key) return;
-    let stopped = false;
-    let revision: number | undefined;
-    let timer: ReturnType<typeof setTimeout>;
+    if (key === undefined || (role === "host" && !key)) return;
+    let stopped = false,
+      first = true,
+      inFlight = false,
+      failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let current: AbortController | undefined;
-    let inFlight = false;
-    let failures = 0;
     async function poll() {
-      if (inFlight || stopped) return;
+      if (stopped || inFlight || !navigator.onLine || document.hidden) return;
       inFlight = true;
       current = new AbortController();
-      const timeout = setTimeout(() => current?.abort(), 10000);
-      let terminal = false;
+      let terminal = false,
+        wait = 4000;
       try {
-        const res = await fetch(
+        const revision = first ? undefined : viewRef.current?.revision;
+        const headers: Record<string, string> = key
+          ? {
+              [role === "host" ? "Authorization" : "X-Player-Key"]:
+                role === "host" ? `Bearer ${key}` : key,
+            }
+          : {};
+        const next = await api<RoomView | null>(
           `/api/rooms/${id}${revision ? `?revision=${revision}` : ""}`,
-          {
-            headers: key ? { Authorization: `Bearer ${key}` } : {},
-            cache: "no-store",
-            signal: current.signal,
-          },
+          { headers, signal: current.signal },
         );
         if (stopped) return;
-        if (res.status !== 304) {
-          const data = await res.json();
-          if (!res.ok) {
-            terminal = [401, 404, 410].includes(res.status);
-            throw new Error(data.error || "接続を確認しています。");
-          }
-          revision = data.revision;
-          setView(data);
-        }
+        if (next) acceptView(next);
         setError("");
         setConnected(true);
+        setLastSync(Date.now());
         failures = 0;
+        first = false;
       } catch (error) {
-        if (!stopped) {
-          failures++;
-          setConnected(false);
-          setError(
-            error instanceof Error && error.name !== "AbortError"
-              ? error.message
-              : "接続を確認しています。画面を閉じずにお待ちください。",
-          );
-        }
+        if (stopped) return;
+        failures++;
+        setConnected(false);
+        terminal =
+          error instanceof RequestError &&
+          [401, 404, 410].includes(error.status);
+        wait =
+          error instanceof RequestError && error.retryAfter
+            ? Math.min(60000, error.retryAfter)
+            : Math.min(30000, 4000 * 2 ** failures);
+        setError(
+          error instanceof Error ? error.message : "接続を確認しています。",
+        );
       } finally {
-        clearTimeout(timeout);
         inFlight = false;
-        if (!stopped && !terminal)
-          timer = setTimeout(
-            poll,
-            Math.min(15000, 4000 * Math.max(1, failures)) +
-              Math.random() * 1500,
-          );
+        if (!stopped && !terminal && navigator.onLine && !document.hidden)
+          timer = setTimeout(poll, wait + Math.random() * 1500);
       }
     }
-    void poll();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") {
-        clearTimeout(timer);
+    const resume = () => {
+      clearTimeout(timer);
+      if (!navigator.onLine) {
+        current?.abort();
+        setConnected(false);
+        setError(
+          "インターネットに接続されていません。カードを閉じずに、回線の復旧をお待ちください。",
+        );
+      } else if (!document.hidden) {
+        setConnected(false);
+        first = true;
         void poll();
+      } else {
+        current?.abort();
+        setConnected(false);
       }
     };
-    document.addEventListener("visibilitychange", onVisible);
+    void poll();
+    if (!navigator.onLine) resume();
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", resume);
+    document.addEventListener("visibilitychange", resume);
     return () => {
       stopped = true;
       clearTimeout(timer);
       current?.abort();
-      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("offline", resume);
+      document.removeEventListener("visibilitychange", resume);
     };
-  }, [id, key, role, generation]);
-  return { view, error, connected, refresh };
+  }, [id, key, role, generation, acceptView]);
+  return { view, error, connected, lastSync, refresh, acceptView };
 }
+
 function Connection({ connected }: { connected: boolean }) {
   return (
     <span className={`connection ${connected ? "online" : ""}`}>
@@ -158,8 +199,12 @@ function QrCode({ url }: { url: string }) {
 }
 
 export default function RoomClient({ id, role }: { id: string; role: Role }) {
-  const key = useHostKey(id, role === "host");
-  const { view, error, connected, refresh } = useRoom(id, role, key);
+  const { key, remember } = useRoomKey(id, role);
+  const { view, error, connected, lastSync, refresh, acceptView } = useRoom(
+    id,
+    role,
+    key,
+  );
   const [origin, setOrigin] = useState("");
   const [toast, setToast] = useState("");
   useEffect(() => setOrigin(location.origin), []);
@@ -195,7 +240,7 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
         </Link>
       </main>
     );
-  if (!view)
+  if (!view || view.id !== id)
     return (
       <main className="simple-page">
         <Logo />
@@ -224,6 +269,21 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
         )}
       </header>
       <RoomError error={error} refresh={refresh} />
+      <div className={`sync-banner ${connected ? "synced" : "stale"}`}>
+        <span role="status">
+          {connected
+            ? "● 最新の状態を確認済み"
+            : "◷ 再接続中 — 表示は最後に確認できた状態です。操作を停止しています。"}
+        </span>
+        {lastSync && (
+          <span aria-hidden="true">
+            最終同期{" "}
+            {new Date(lastSync).toLocaleTimeString("ja-JP", {
+              timeZone: "Asia/Tokyo",
+            })}
+          </span>
+        )}
+      </div>
       {role === "host" ? (
         <Host
           view={view}
@@ -231,11 +291,24 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
           refresh={refresh}
           joinUrl={joinUrl}
           copy={copy}
+          connected={connected}
+          onView={acceptView}
         />
       ) : role === "screen" ? (
         <Screen view={view} joinUrl={joinUrl} />
       ) : (
-        <Participant view={view} refresh={refresh} />
+        <Participant
+          view={view}
+          refresh={refresh}
+          connected={connected}
+          playerKey={key || null}
+          rememberKey={remember}
+          copy={copy}
+          onJoined={(secret, room) => {
+            remember(secret);
+            acceptView(room);
+          }}
+        />
       )}
       {toast && (
         <div className="toast" role="status">
@@ -257,16 +330,22 @@ function Host({
   refresh,
   joinUrl,
   copy,
+  connected,
+  onView,
 }: {
   view: RoomView;
   hostKey: string;
   refresh: () => void;
   joinUrl: string;
   copy: (text: string) => void;
+  connected: boolean;
+  onView: (view: RoomView) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [prizeName, setPrizeName] = useState("");
+  const prizeId = useRef<string | null>(null);
+  const mutation = useRef(false);
   const [rolling, setRolling] = useState(false);
   const [paymentReturn, setPaymentReturn] = useState(false);
   useEffect(
@@ -277,24 +356,27 @@ function Host({
     [],
   );
   async function action(input: Record<string, unknown>) {
-    if (busy) return false;
+    if (mutation.current || !connected) return false;
+    mutation.current = true;
     setBusy(true);
     setError("");
     if (input.action === "draw") setRolling(true);
     try {
-      const res = await fetch(`/api/rooms/${view.id}/action`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${hostKey}`,
+      const data = await api<{ room: RoomView }>(
+        `/api/rooms/${view.id}/action`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${hostKey}`,
+          },
+          body: JSON.stringify({
+            ...input,
+            expectedGameNumber: view.gameNumber,
+          }),
         },
-        body: JSON.stringify(input),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error);
-      }
-      refresh();
+      );
+      onView(data.room);
       return true;
     } catch (error) {
       setError(
@@ -303,21 +385,25 @@ function Host({
       refresh();
       return false;
     } finally {
+      mutation.current = false;
       setBusy(false);
       setRolling(false);
     }
   }
   async function upgrade() {
-    if (busy) return;
+    if (mutation.current || !connected) return;
+    mutation.current = true;
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/rooms/${view.id}/checkout`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${hostKey}` },
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await api<{ url: string }>(
+        `/api/rooms/${view.id}/checkout`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${hostKey}` },
+        },
+        25000,
+      );
       const url = new URL(data.url);
       if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com")
         throw new Error("決済画面を開けませんでした。");
@@ -327,15 +413,16 @@ function Host({
         error instanceof Error ? error.message : "決済を開始できませんでした。",
       );
       setBusy(false);
+      mutation.current = false;
+      refresh();
     }
   }
   async function downloadCsv() {
     try {
-      const res = await fetch(`/api/rooms/${view.id}/export`, {
+      const blob = await apiBlob(`/api/rooms/${view.id}/export`, {
         headers: { Authorization: `Bearer ${hostKey}` },
       });
-      if (!res.ok) throw new Error("結果を保存できませんでした。");
-      const url = URL.createObjectURL(await res.blob());
+      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `bingo-${view.id}.csv`;
@@ -355,6 +442,7 @@ function Host({
           <span className="eyebrow">YOUR EVENT ROOM</span>
           <h1>{view.title}</h1>
           <span className={`event-status ${view.status}`}>
+            <span>第{view.gameNumber}ゲーム · </span>
             {view.status === "lobby"
               ? "● 参加受付中"
               : view.status === "playing"
@@ -396,7 +484,9 @@ function Host({
       </div>
       {paymentReturn && view.plan === "free" && (
         <div className="notice" role="status">
-          Stripeの決済結果を確認しています。反映まで少しお待ちください。
+          {view.paymentStatus === "failed"
+            ? "お支払いが完了していません。人数制限は解除されていません。接続を確認し、もう一度お試しください。"
+            : "Stripeの決済結果を確認しています。反映まで少しお待ちください。"}
           <button onClick={refresh}>確認する</button>
         </div>
       )}
@@ -404,6 +494,14 @@ function Host({
         <p className="error" role="alert">
           {error}
         </p>
+      )}
+      {view.status === "lobby" && (
+        <Invitation
+          view={view}
+          joinUrl={joinUrl}
+          copy={copy}
+          className="lobby-mobile-invite"
+        />
       )}
       <div className="stats-grid">
         <div>
@@ -482,6 +580,7 @@ function Host({
                 className="button draw-button"
                 disabled={
                   busy ||
+                  !connected ||
                   !view.count ||
                   view.status === "finished" ||
                   view.drawn.length === 75
@@ -509,7 +608,11 @@ function Host({
               <h2>
                 参加者と当選結果 <span>{view.count}</span>
               </h2>
-              <button className="text-link" onClick={downloadCsv}>
+              <button
+                className="text-link"
+                onClick={downloadCsv}
+                disabled={!connected || busy}
+              >
                 CSV保存 ↓
               </button>
             </div>
@@ -544,25 +647,12 @@ function Host({
           </section>
         </div>
         <aside className="dashboard-right">
-          <section className="panel join-panel">
-            <div className="panel-heading">
-              <h2>参加者を招待</h2>
-              <span>SCAN & JOIN</span>
-            </div>
-            <QrCode url={joinUrl} />
-            <b className="join-code-label">{view.id}</b>
-            <p>
-              QRを読むか、トップページで
-              <br />
-              この参加コードを入力してください。
-            </p>
-            <button
-              className="button outline wide small"
-              onClick={() => copy(joinUrl)}
-            >
-              参加URLをコピー ↗
-            </button>
-          </section>
+          <Invitation
+            view={view}
+            joinUrl={joinUrl}
+            copy={copy}
+            className={view.status === "lobby" ? "lobby-desktop-invite" : ""}
+          />
           <section className="panel prizes-panel">
             <div className="panel-heading">
               <h2>景品リスト</h2>
@@ -572,8 +662,17 @@ function Host({
               className="prize-form"
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (await action({ action: "prize", name: prizeName }))
+                prizeId.current ??= crypto.randomUUID();
+                if (
+                  await action({
+                    action: "prize",
+                    name: prizeName,
+                    prizeId: prizeId.current,
+                  })
+                ) {
                   setPrizeName("");
+                  prizeId.current = null;
+                }
               }}
             >
               <label className="sr-only" htmlFor="prize-name">
@@ -585,11 +684,14 @@ function Host({
                 maxLength={40}
                 required
                 value={prizeName}
-                onChange={(e) => setPrizeName(e.target.value)}
+                onChange={(e) => {
+                  setPrizeName(e.target.value);
+                  prizeId.current = null;
+                }}
               />
               <button
                 className="button primary"
-                disabled={busy}
+                disabled={busy || !connected}
                 aria-label="景品を追加"
               >
                 ＋
@@ -602,7 +704,7 @@ function Host({
                   prize={prize}
                   view={view}
                   index={i}
-                  busy={busy}
+                  busy={busy || !connected}
                   action={action}
                 />
               ))
@@ -626,7 +728,7 @@ function Host({
               </p>
               <button
                 className="button primary wide small"
-                disabled={busy || !view.paymentReady}
+                disabled={busy || !connected || !view.paymentReady}
                 onClick={upgrade}
               >
                 {view.paymentReady
@@ -650,7 +752,7 @@ function Host({
                 )
                   void action({ action: "reset" });
               }}
-              disabled={busy}
+              disabled={busy || !connected}
             >
               リハーサル・次のゲームへ ↻
             </button>
@@ -659,7 +761,7 @@ function Host({
                 if (confirm("このゲームを終了します。結果は保存されます。"))
                   void action({ action: "finish" });
               }}
-              disabled={busy || view.status === "finished"}
+              disabled={busy || !connected || view.status === "finished"}
             >
               ゲームを終了する
             </button>
@@ -673,6 +775,40 @@ function Host({
         </aside>
       </div>
     </main>
+  );
+}
+
+function Invitation({
+  view,
+  joinUrl,
+  copy,
+  className = "",
+}: {
+  view: RoomView;
+  joinUrl: string;
+  copy: (value: string) => void;
+  className?: string;
+}) {
+  return (
+    <section className={`panel join-panel ${className}`}>
+      <div className="panel-heading">
+        <h2>参加者を招待</h2>
+        <span>SCAN & JOIN</span>
+      </div>
+      <QrCode url={joinUrl} />
+      <b className="join-code-label">{view.id}</b>
+      <p>
+        QRを読むか、トップページで
+        <br />
+        この参加コードを入力してください。
+      </p>
+      <button
+        className="button outline wide small"
+        onClick={() => copy(joinUrl)}
+      >
+        参加URLをコピー ↗
+      </button>
+    </section>
   );
 }
 
@@ -702,6 +838,34 @@ function PrizeRow({
         </span>
         <b>{prize.name}</b>
         {winner && <span className="awarded">✓ {winner.name}</span>}
+        {winner ? (
+          <button
+            className="text-link"
+            disabled={busy}
+            onClick={() => {
+              if (
+                confirm(
+                  "景品の割り当てを取り消します。手渡し済みの場合は受け渡しも確認してください。",
+                )
+              )
+                void action({ action: "unaward", prizeId: prize.id });
+            }}
+          >
+            当選者を変更
+          </button>
+        ) : (
+          <button
+            className="prize-remove"
+            aria-label={`${prize.name}を削除`}
+            disabled={busy}
+            onClick={() => {
+              if (confirm(`「${prize.name}」を削除しますか？`))
+                void action({ action: "remove_prize", prizeId: prize.id });
+            }}
+          >
+            ×
+          </button>
+        )}
       </div>
       {!winner && eligible.length > 0 && (
         <div className="award-controls">
@@ -722,13 +886,15 @@ function PrizeRow({
           </select>
           <button
             disabled={!selected || busy}
-            onClick={() =>
-              void action({
-                action: "award",
-                prizeId: prize.id,
-                playerId: selected,
-              })
-            }
+            onClick={() => {
+              const name = eligible.find((p) => p.id === selected)?.name;
+              if (confirm(`「${prize.name}」を${name}さんに割り当てますか？`))
+                void action({
+                  action: "award",
+                  prizeId: prize.id,
+                  playerId: selected,
+                });
+            }}
           >
             確定
           </button>
@@ -741,9 +907,19 @@ function PrizeRow({
 function Participant({
   view,
   refresh,
+  connected,
+  playerKey,
+  copy,
+  onJoined,
+  rememberKey,
 }: {
   view: RoomView;
   refresh: () => void;
+  connected: boolean;
+  playerKey: string | null;
+  copy: (value: string) => void;
+  onJoined: (secret: string, room: RoomView) => void;
+  rememberKey: (secret: string) => void;
 }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -764,23 +940,32 @@ function Participant({
           <form
             onSubmit={async (e) => {
               e.preventDefault();
+              if (busy || !connected) return;
               setBusy(true);
               setError("");
               try {
-                const res = await fetch(`/api/rooms/${view.id}/join`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ name }),
-                });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error);
-                refresh();
+                const joinKey =
+                  playerKey ||
+                  savedSecret(`bingo-player-${view.id}`) ||
+                  clientSecret();
+                saveSecret(`bingo-player-${view.id}`, joinKey);
+                rememberKey(joinKey);
+                const data = await api<{ room: RoomView; playerKey: string }>(
+                  `/api/rooms/${view.id}/join`,
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, joinKey }),
+                  },
+                );
+                onJoined(data.playerKey, data.room);
               } catch (error) {
                 setError(
                   error instanceof Error
                     ? error.message
                     : "参加できませんでした。",
                 );
+                refresh();
               } finally {
                 setBusy(false);
               }
@@ -796,14 +981,17 @@ function Participant({
               autoComplete="nickname"
               placeholder="例：ビンゴ太郎"
             />
-            <button className="button primary wide" disabled={busy}>
+            <button
+              className="button primary wide"
+              disabled={busy || !connected}
+            >
               {busy ? "カードを準備しています…" : "ビンゴに参加する"}
               <Arrow />
             </button>
             <small>
               ニックネームは幹事・会場スクリーンに表示されます。
               <br />
-              カードに戻るときは、同じ端末・ブラウザで開いてください。
+              参加後に復帰リンクを保存しておくと、別端末でも同じカードに戻れます。
             </small>
           </form>
         ) : (
@@ -852,6 +1040,21 @@ function Participant({
                 : "次の番号は、あなたのラッキーナンバーかも。"}
       </div>
       <BingoCard card={me.card} drawn={view.drawn} />
+      {playerKey && (
+        <button
+          className="button outline wide recovery-button"
+          onClick={() =>
+            copy(`${location.origin}/join/${view.id}#card=${playerKey}`)
+          }
+        >
+          カードの復帰リンクを保存 ↗
+        </button>
+      )}
+      {playerKey && (
+        <p className="recovery-help">
+          このリンクはあなただけのものです。他の人に共有しないでください。
+        </p>
+      )}
       {prize && (
         <div className="won-prize">
           <span>YOUR GIFT</span>
@@ -867,7 +1070,7 @@ function Participant({
       <p className="participant-help">
         カードは自動で開きます。ビンゴの申告も不要です。
         <br />
-        画面が止まったら、同じブラウザで再読み込みしてください。
+        通信が切れてもカードを閉じず、回線の復旧をお待ちください。
       </p>
       <details className="drawn-details">
         <summary>これまでに出た番号を見る</summary>
@@ -936,7 +1139,7 @@ function Screen({ view, joinUrl }: { view: RoomView; joinUrl: string }) {
 }
 
 export function PrintCards({ id }: { id: string }) {
-  const key = useHostKey(id, true);
+  const { key } = useRoomKey(id, "host");
   const [cards, setCards] = useState<
     { id: string; name: string; card: Card }[]
   >([]);
@@ -944,12 +1147,13 @@ export function PrintCards({ id }: { id: string }) {
   useEffect(() => {
     if (!key) return;
     let active = true;
-    fetch(`/api/rooms/${id}/export?format=cards`, {
-      headers: { Authorization: `Bearer ${key}` },
-    })
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+    api<{ id: string; name: string; card: Card }[]>(
+      `/api/rooms/${id}/export?format=cards`,
+      {
+        headers: { Authorization: `Bearer ${key}` },
+      },
+    )
+      .then((data) => {
         if (active) setCards(data);
       })
       .catch((error) => {

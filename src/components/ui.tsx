@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { api, clientSecret } from "@/lib/client";
 import type { Card } from "@/lib/game";
 
 export function Logo({ light = false }: { light?: boolean }) {
@@ -41,25 +42,29 @@ export function BingoCard({
           <b key={i}>{n}</b>
         ))}
       </div>
-      <div className="card-numbers" role="grid" aria-label="ビンゴカード">
-        {card.map((number, index) => (
-          <div
-            key={index}
-            role="gridcell"
-            aria-label={
-              number === 0
-                ? "フリーマス"
-                : `${number}${drawn.includes(number) ? "、開いています" : ""}`
-            }
-            className={`${number === 0 ? "free" : ""} ${drawn.includes(number) ? "marked" : ""}`}
-          >
-            {number === 0 ? (
-              <span className="free-symbol">
-                ✦<small>FREE</small>
-              </span>
-            ) : (
-              number
-            )}
+      <div className="card-numbers" role="table" aria-label="ビンゴカード">
+        {Array.from({ length: 5 }, (_, row) => (
+          <div role="row" className="card-row" key={row}>
+            {card.slice(row * 5, row * 5 + 5).map((number, col) => (
+              <div
+                key={col}
+                role="cell"
+                aria-label={
+                  number === 0
+                    ? "フリーマス、開いています"
+                    : `${number}${drawn.includes(number) ? "、開いています" : "、まだ開いていません"}`
+                }
+                className={`${number === 0 ? "free" : ""} ${drawn.includes(number) ? "marked" : ""}`}
+              >
+                {number === 0 ? (
+                  <span className="free-symbol">
+                    ✦<small>FREE</small>
+                  </span>
+                ) : (
+                  number
+                )}
+              </div>
+            ))}
           </div>
         ))}
       </div>
@@ -84,110 +89,173 @@ export function CreateRoom({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [ready, setReady] = useState<boolean | null>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const pending = useRef<{ title: string; key: string } | null>(null);
+  async function checkReady() {
+    setReady(null);
+    try {
+      await api("/api/ready");
+      setReady(true);
+    } catch {
+      setReady(false);
+    }
+  }
   useEffect(() => {
+    const element = dialog.current!;
     const previous = document.activeElement as HTMLElement | null;
     const overflow = document.body.style.overflow;
+    try {
+      const value = JSON.parse(
+        localStorage.getItem("bingo-pending-create") || "null",
+      );
+      if (
+        value &&
+        typeof value.title === "string" &&
+        /^[A-Za-z0-9_-]{43}$/.test(value.key)
+      ) {
+        pending.current = value;
+        setTitle(value.title);
+      }
+    } catch {
+      /* Storage may be disabled. The current request remains recoverable in memory. */
+    }
+    element.showModal();
+    element.querySelector<HTMLInputElement>("input")?.focus();
     document.body.style.overflow = "hidden";
+    void checkReady();
     return () => {
+      element.close();
       document.body.style.overflow = overflow;
       previous?.focus();
     };
   }, []);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <section
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="create-title"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-          if (e.key === "Tab") {
-            const items = e.currentTarget.querySelectorAll<HTMLElement>(
-              "button:not(:disabled), input, a[href]",
-            );
-            const first = items[0],
-              last = items[items.length - 1];
-            if (e.shiftKey && document.activeElement === first) {
-              e.preventDefault();
-              last.focus();
-            } else if (!e.shiftKey && document.activeElement === last) {
-              e.preventDefault();
-              first.focus();
+    <dialog
+      ref={dialog}
+      className="modal"
+      aria-labelledby="create-title"
+      onClose={onClose}
+      onCancel={(e) => {
+        if (busy) e.preventDefault();
+      }}
+      onClick={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (
+          !busy &&
+          e.target === e.currentTarget &&
+          (e.clientX < rect.left ||
+            e.clientX > rect.right ||
+            e.clientY < rect.top ||
+            e.clientY > rect.bottom)
+        )
+          e.currentTarget.close();
+      }}
+    >
+      <button
+        className="close-button"
+        disabled={busy}
+        onClick={() => dialog.current?.close()}
+        aria-label="閉じる"
+      >
+        ×
+      </button>
+      <span className="eyebrow">LET’S GET TOGETHER</span>
+      <h2 id="create-title">今日は、なんの集まり？</h2>
+      <p className="muted">
+        名前をつけたら、会場のできあがり。
+        <br />
+        30人まで無料、クレジットカードも不要です。
+      </p>
+      {ready === false && (
+        <div className="notice" role="alert">
+          ただいまイベントの作成を一時停止しています。入力内容はこの画面に残るので、少し待ってからお試しください。
+          <button onClick={checkReady}>接続を再確認</button>
+        </div>
+      )}
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (busy || !ready) return;
+          setBusy(true);
+          setError("");
+          try {
+            if (!pending.current || pending.current.title !== title)
+              pending.current = { title, key: clientSecret() };
+            try {
+              localStorage.setItem(
+                "bingo-pending-create",
+                JSON.stringify(pending.current),
+              );
+            } catch {
+              /* A retry in this dialog still uses the same key. */
             }
+            const data = await api<{ id: string; hostToken: string }>(
+              "/api/rooms",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Idempotency-Key": pending.current.key,
+                },
+                body: JSON.stringify({ title }),
+              },
+            );
+            try {
+              localStorage.removeItem("bingo-pending-create");
+            } catch {
+              /* The host link is available in the URL. */
+            }
+            location.assign(`/host/${data.id}#key=${data.hostToken}`);
+          } catch (error) {
+            setError(
+              error instanceof Error
+                ? error.message
+                : "イベントを作成できませんでした。",
+            );
+            setBusy(false);
           }
         }}
       >
-        <button className="close-button" onClick={onClose} aria-label="閉じる">
-          ×
-        </button>
-        <span className="eyebrow">LET’S GET TOGETHER</span>
-        <h2 id="create-title">今日は、なんの集まり？</h2>
-        <p className="muted">
-          名前をつけたら、会場のできあがり。
-          <br />
-          30人まで無料、クレジットカードも不要です。
-        </p>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
-            setError("");
-            try {
-              const res = await fetch("/api/rooms", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ title }),
-              });
-              const data = await res.json();
-              if (!res.ok) throw new Error(data.error);
-              location.assign(`/host/${data.id}#key=${data.hostToken}`);
-            } catch (error) {
-              setError(
-                error instanceof Error
-                  ? error.message
-                  : "イベントを作成できませんでした。",
-              );
-              setBusy(false);
-            }
-          }}
-        >
-          <label htmlFor="event-name">イベント名</label>
-          <input
-            id="event-name"
-            autoFocus
-            autoComplete="off"
-            maxLength={40}
-            required
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="例：みんなで忘年会 2026"
-          />
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-          <button className="button primary wide" disabled={busy}>
-            {busy ? "会場を準備しています…" : "無料でイベントをつくる"}
-            <Arrow />
-          </button>
-          <p className="fineprint">
-            <Link href="/terms" target="_blank">
-              利用規約
-            </Link>
-            ・
-            <Link href="/privacy" target="_blank">
-              プライバシーポリシー
-            </Link>
-            に同意して作成します。
+        <label htmlFor="event-name">イベント名</label>
+        <input
+          id="event-name"
+          autoFocus
+          autoComplete="off"
+          maxLength={40}
+          required
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="例：みんなで忘年会 2026"
+        />
+        {error && (
+          <p className="error" role="alert">
+            {error}
           </p>
-        </form>
-      </section>
-    </div>
+        )}
+        <button className="button primary wide" disabled={busy || !ready}>
+          {busy
+            ? "会場を準備しています…"
+            : ready === null
+              ? "接続を確認しています…"
+              : "無料でイベントをつくる"}
+          <Arrow />
+        </button>
+        <p className="fineprint">
+          <Link href="/terms" target="_blank">
+            利用規約
+          </Link>
+          ・
+          <Link href="/privacy" target="_blank">
+            プライバシーポリシー
+          </Link>
+          に同意して作成します。
+        </p>
+      </form>
+    </dialog>
   );
 }
+
 export function Footer() {
   return (
     <footer className="footer">

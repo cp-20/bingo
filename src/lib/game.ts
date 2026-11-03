@@ -15,6 +15,7 @@ export type Room = {
   createdAt: number;
   expiresAt: number;
   revision: number;
+  gameNumber: number;
 };
 export type Player = {
   id: string;
@@ -29,6 +30,7 @@ export type RoomView = Room & {
   players?: Player[];
   me?: Player & { card: Card };
   paymentReady?: boolean;
+  paymentStatus?: string;
 };
 
 export function makeCard(): Card {

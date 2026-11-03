@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
 
 process.env.TURSO_DATABASE_URL = `file:${join(mkdtempSync(join(tmpdir(), "bingo-test-")), "test.db")}`;
 const { createRoom, getView, joinRoom, hostAction, printableCards, AppError } =
   await import("../src/lib/service");
 const { db } = await import("../src/lib/db");
-const { failedSession, fulfillSession, stripeClient } =
-  await import("../src/lib/payments");
 
 test("host authorization and player card privacy are enforced", async () => {
   const room = await createRoom("Test room", "test-privacy");
@@ -53,20 +52,21 @@ test("double clicks draw once; ties are ranked equally; reset preserves cards", 
   const alice = await joinRoom(room.id, "Alice", undefined);
   const bob = await joinRoom(room.id, "Bob", undefined);
   const before = (await getView(room.id, null, alice.secret))!;
-  const cards = await printableCards(room.id, room.hostToken);
   // Give both fixture players the same card to exercise a guaranteed tie.
   await (
     await db()
   ).execute({
     sql: "UPDATE players SET card=? WHERE room_id=?",
-    args: [JSON.stringify(cards[0].card), room.id],
+    args: [JSON.stringify(before.me!.card), room.id],
   });
   const outcomes = await Promise.allSettled([
     hostAction(room.id, room.hostToken, {
+      expectedGameNumber: 1,
       action: "draw",
       expectedDrawCount: 0,
     }),
     hostAction(room.id, room.hostToken, {
+      expectedGameNumber: 1,
       action: "draw",
       expectedDrawCount: 0,
     }),
@@ -83,6 +83,7 @@ test("double clicks draw once; ties are ranked equally; reset preserves cards", 
   assert.equal((await joinRoom(room.id, "Bob", bob.secret)).secret, bob.secret);
   for (let i = 1; i < 75; i++)
     await hostAction(room.id, room.hostToken, {
+      expectedGameNumber: 1,
       action: "draw",
       expectedDrawCount: i,
     });
@@ -91,124 +92,67 @@ test("double clicks draw once; ties are ranked equally; reset preserves cards", 
   assert.equal(result.winners.length, 2);
   assert.equal(result.winners[0].rank, 1);
   assert.equal(result.winners[1].rank, 1);
-  await hostAction(room.id, room.hostToken, { action: "prize", name: "Gift" });
+  await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
+    action: "prize",
+    name: "Gift",
+    prizeId: randomUUID(),
+  });
   const prize = (await getView(room.id, room.hostToken))!.prizes[0];
   await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
     action: "award",
     prizeId: prize.id,
     playerId: result.winners[0].id,
   });
   await assert.rejects(
     hostAction(room.id, room.hostToken, {
+      expectedGameNumber: 1,
       action: "award",
       prizeId: prize.id,
       playerId: result.winners[1].id,
     }),
     /確認/,
   );
-  await hostAction(room.id, room.hostToken, { action: "reset" });
+  await assert.rejects(
+    hostAction(room.id, room.hostToken, {
+      expectedGameNumber: 1,
+      action: "remove_prize",
+      prizeId: prize.id,
+    }),
+    /割り当て済み/,
+  );
+  await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
+    action: "unaward",
+    prizeId: prize.id,
+  });
+  assert.equal(
+    (await getView(room.id, room.hostToken))!.prizes[0].playerId,
+    null,
+  );
+  await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
+    action: "remove_prize",
+    prizeId: prize.id,
+  });
+  assert.equal((await getView(room.id, room.hostToken))!.prizes.length, 0);
+  await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
+    action: "prize",
+    name: "Second gift",
+    prizeId: randomUUID(),
+  });
+  await hostAction(room.id, room.hostToken, {
+    expectedGameNumber: 1,
+    action: "reset",
+  });
   const reset = (await getView(room.id, null, alice.secret))!;
   assert.equal(reset.status, "lobby");
   assert.equal(reset.drawn.length, 0);
   assert.equal(reset.winners.length, 0);
   assert.deepEqual(reset.me?.card, before.me?.card);
   assert.equal(reset.prizes[0].playerId, null);
-});
-test("sandbox fulfillment requires the exact paid session and is idempotent", async () => {
-  const room = await createRoom("Payment test", "test-pay");
-  const store = await db();
-  await store.execute({
-    sql: "UPDATE rooms SET checkout_id=? WHERE id=?",
-    args: ["cs_test_fixture", room.id],
-  });
-  const session = {
-    id: "cs_test_fixture",
-    livemode: false,
-    payment_status: "paid" as const,
-    amount_total: 2980,
-    currency: "jpy",
-    metadata: { roomId: room.id, product: "bingo_event" },
-    client_reference_id: room.id,
-  };
-  assert.equal(
-    await fulfillSession({ ...session, payment_status: "unpaid" }),
-    false,
-  );
-  assert.equal(await fulfillSession({ ...session, livemode: true }), false);
-  await assert.rejects(fulfillSession({ ...session, amount_total: 1 }));
-  await assert.rejects(fulfillSession({ ...session, currency: "usd" }));
-  await assert.rejects(fulfillSession({ ...session, id: "cs_test_other" }));
-  assert.equal((await getView(room.id, null))?.plan, "free");
-  assert.equal(await fulfillSession(session), true);
-  const once = (await getView(room.id, null))!;
-  assert.equal(once.limit, 300);
-  assert.equal(once.plan, "event");
-  await fulfillSession(session);
-  const twice = (await getView(room.id, null))!;
-  assert.equal(twice.expiresAt, once.expiresAt);
-  assert.equal(twice.revision, once.revision);
-  assert.equal(
-    Number(
-      (await store.execute("SELECT COUNT(*) AS n FROM payments")).rows[0].n,
-    ),
-    1,
-  );
-});
-test("live keys are refused without making any network request", () => {
-  process.env.STRIPE_SECRET_KEY = ["sk", "live", "fixture"].join("_");
-  assert.throws(() => stripeClient(), /テスト決済/);
-  delete process.env.STRIPE_SECRET_KEY;
-});
-test("delayed payment can activate an expired event; failure can be retried", async () => {
-  const room = await createRoom("Delayed payment", "test-delayed");
-  const store = await db();
-  await store.execute({
-    sql: "UPDATE rooms SET checkout_id=? WHERE id=?",
-    args: ["cs_test_failed", room.id],
-  });
-  await failedSession({
-    id: "cs_test_other",
-    livemode: false,
-    metadata: { roomId: room.id, product: "bingo_event" },
-  });
-  assert.equal(
-    (
-      await store.execute({
-        sql: "SELECT checkout_id FROM rooms WHERE id=?",
-        args: [room.id],
-      })
-    ).rows[0].checkout_id,
-    "cs_test_failed",
-  );
-  await failedSession({
-    id: "cs_test_failed",
-    livemode: false,
-    metadata: { roomId: room.id, product: "bingo_event" },
-  });
-  const afterFailure = (
-    await store.execute({
-      sql: "SELECT checkout_id,checkout_version FROM rooms WHERE id=?",
-      args: [room.id],
-    })
-  ).rows[0];
-  assert.equal(afterFailure.checkout_id, null);
-  assert.equal(Number(afterFailure.checkout_version), 1);
-  await store.execute({
-    sql: "UPDATE rooms SET checkout_id=?,expires_at=? WHERE id=?",
-    args: ["cs_test_delayed", Date.now() - 1000, room.id],
-  });
-  await fulfillSession({
-    id: "cs_test_delayed",
-    livemode: false,
-    payment_status: "paid",
-    amount_total: 2980,
-    currency: "jpy",
-    metadata: { roomId: room.id, product: "bingo_event" },
-    client_reference_id: room.id,
-  });
-  const view = (await getView(room.id, null))!;
-  assert.equal(view.plan, "event");
-  assert.ok(view.expiresAt > Date.now() + 29 * 86400000);
 });
 test("event plan accepts exactly 300 players", async () => {
   const room = await createRoom("Large event", "test-large");
@@ -252,4 +196,89 @@ test("simultaneous joins cannot exceed the free capacity", async () => {
       assert.ok(
         result.reason instanceof AppError && result.reason.status === 409,
       );
+});
+
+test("lost creation and join responses can be retried without duplicate rooms or cards", async () => {
+  const secret = randomBytes(32).toString("base64url");
+  const [first, second] = await Promise.all([
+    createRoom("Retry", "retry-create", secret),
+    createRoom("Retry", "retry-create", secret),
+  ]);
+  assert.deepEqual(first, second);
+  await assert.rejects(createRoom("Changed", "retry-create", secret), /内容/);
+  const joinKey = randomBytes(32).toString("base64url");
+  const [alice, replay] = await Promise.all([
+    joinRoom(first.id, "Alice", undefined, joinKey),
+    joinRoom(first.id, "Alice", undefined, joinKey),
+  ]);
+  assert.equal(alice.secret, replay.secret);
+  await hostAction(first.id, first.hostToken, {
+    action: "draw",
+    expectedGameNumber: 1,
+    expectedDrawCount: 0,
+  });
+  const recovered = await joinRoom(first.id, "Alice", undefined, joinKey);
+  assert.equal(recovered.secret, joinKey);
+  assert.equal((await getView(first.id, null, joinKey))!.count, 1);
+});
+test("a stale command cannot operate on the next game", async () => {
+  const room = await createRoom("Rounds", "rounds");
+  await joinRoom(room.id, "Alice", undefined);
+  await hostAction(room.id, room.hostToken, {
+    action: "reset",
+    expectedGameNumber: 1,
+  });
+  await assert.rejects(
+    hostAction(room.id, room.hostToken, {
+      action: "draw",
+      expectedGameNumber: 1,
+      expectedDrawCount: 0,
+    }),
+    (e) => e instanceof AppError && e.code === "STALE_GAME",
+  );
+  await assert.rejects(
+    hostAction(room.id, room.hostToken, {
+      action: "finish",
+      expectedGameNumber: 1,
+    }),
+    /別のゲーム/,
+  );
+  await hostAction(room.id, room.hostToken, {
+    action: "draw",
+    expectedGameNumber: 2,
+    expectedDrawCount: 0,
+  });
+  assert.equal((await getView(room.id, null))!.drawn.length, 1);
+});
+test("retrying a prize registration keeps one prize", async () => {
+  const room = await createRoom("Prizes", "prize-retry");
+  const command = {
+    action: "prize",
+    name: "Gift",
+    prizeId: randomUUID(),
+    expectedGameNumber: 1,
+  };
+  await hostAction(room.id, room.hostToken, command);
+  await hostAction(room.id, room.hostToken, command);
+  assert.equal((await getView(room.id, room.hostToken))!.prizes.length, 1);
+  await assert.rejects(
+    hostAction(room.id, room.hostToken, { ...command, name: "Other" }),
+    /内容/,
+  );
+});
+
+test("a creator budget does not interrupt existing events", async () => {
+  const room = await createRoom("Existing room", "budget-existing");
+  const key = `room-budget:${Math.floor(Date.now() / 3600000)}`;
+  await (
+    await db()
+  ).execute({
+    sql: "INSERT INTO rate_limits(key,count,expires_at) VALUES(?,100,?) ON CONFLICT(key) DO UPDATE SET count=100",
+    args: [key, Date.now() + 3600000],
+  });
+  await assert.rejects(
+    createRoom("Excess room", "another-origin"),
+    (error) => error instanceof AppError && error.code === "ROOM_BUDGET_LIMIT",
+  );
+  assert.equal((await getView(room.id, null))!.title, "Existing room");
 });

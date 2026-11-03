@@ -1,13 +1,13 @@
 import {
   createHash,
   randomBytes,
-  randomInt,
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import type { Row, Transaction } from "@libsql/client";
-import { db } from "./db";
+import { db, writeTransaction } from "./db";
+import { AppError } from "./errors";
+export { AppError } from "./errors";
 import {
   cardStatus,
   cleanName,
@@ -22,14 +22,6 @@ import {
   type RoomView,
 } from "./game";
 
-export class AppError extends Error {
-  constructor(
-    message: string,
-    public status = 400,
-  ) {
-    super(message);
-  }
-}
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const token = () => randomBytes(32).toString("base64url");
@@ -49,6 +41,7 @@ function roomFrom(row: Row): Room {
     createdAt: Number(row.created_at),
     expiresAt: Number(row.expires_at),
     revision: Number(row.revision),
+    gameNumber: Number(row.game_number),
   };
 }
 async function readRoom(
@@ -84,58 +77,41 @@ export async function authorizeHost(id: string, secret: string | null) {
   checkHost(row, secret);
   return row;
 }
-async function write<T>(fn: (tx: Transaction) => Promise<T>) {
-  for (let attempt = 0; ; attempt++) {
-    let tx: Transaction | undefined;
-    try {
-      tx = await (await db()).transaction("write");
-      const result = await fn(tx);
-      await tx.commit();
-      return result;
-    } catch (error) {
-      if (tx) {
-        try {
-          await tx.rollback();
-        } catch {
-          /* Preserve the original error. */
-        }
-      }
-      const code =
-        error && typeof error === "object" && "code" in error ? error.code : "";
-      if (
-        attempt >= 4 ||
-        (code !== "SQLITE_BUSY" && code !== "TRANSACTION_ACTIVE")
-      )
-        throw error;
-      await delay(20 * (attempt + 1) + randomInt(30));
-    } finally {
-      tx?.close();
-    }
-  }
+export function validSecret(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
-
-export async function createRoom(title: unknown, ip: string) {
+export async function createRoom(
+  title: unknown,
+  ip: string,
+  creationKey?: string,
+) {
   const name = cleanName(title, 40);
-  const secret = token();
+  if (creationKey !== undefined && !validSecret(creationKey))
+    throw new AppError("作成情報を確認してください。");
+  const secret = creationKey || token();
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const id = Array.from(
+  let id = Array.from(
     randomBytes(8),
     (n) => alphabet[n % alphabet.length],
   ).join("");
-  await write(async (tx) => {
+  await writeTransaction(async (tx) => {
     const now = Date.now();
-    await tx.execute({
-      sql: "DELETE FROM rate_limits WHERE expires_at < ?",
-      args: [now],
-    });
-    await tx.execute({
-      sql: "DELETE FROM players WHERE room_id IN (SELECT id FROM rooms WHERE expires_at < ?)",
-      args: [now - 30 * 86400000],
-    });
-    await tx.execute({
-      sql: "DELETE FROM rooms WHERE expires_at < ?",
-      args: [now - 30 * 86400000],
-    });
+    const old = (
+      await tx.execute({
+        sql: "SELECT * FROM rooms WHERE host_hash=?",
+        args: [hash(secret)],
+      })
+    ).rows[0];
+    if (old) {
+      checkedRoom(old);
+      if (old.title !== name)
+        throw new AppError(
+          "作成内容が変わっています。新しく作成してください。",
+          409,
+        );
+      id = String(old.id);
+      return;
+    }
     const key = hash(`${ip}:${Math.floor(now / 3600000)}`);
     const count = await tx.execute({
       sql: "SELECT count FROM rate_limits WHERE key = ?",
@@ -145,7 +121,29 @@ export async function createRoom(title: unknown, ip: string) {
       throw new AppError(
         "イベントを作成しすぎています。時間をおいてお試しください。",
         429,
+        "ROOM_RATE_LIMIT",
+        Math.ceil((3600000 - (now % 3600000)) / 1000),
       );
+    const globalKey = `room-budget:${Math.floor(now / 3600000)}`;
+    const globalCount = Number(
+      (
+        await tx.execute({
+          sql: "SELECT count FROM rate_limits WHERE key=?",
+          args: [globalKey],
+        })
+      ).rows[0]?.count || 0,
+    );
+    if (globalCount >= 100)
+      throw new AppError(
+        "新しい会場の作成が混み合っています。開催中のイベントはそのまま続けられます。時間をおいてお試しください。",
+        429,
+        "ROOM_BUDGET_LIMIT",
+        Math.ceil((3600000 - (now % 3600000)) / 1000),
+      );
+    await tx.execute({
+      sql: "INSERT INTO rate_limits(key,count,expires_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1",
+      args: [globalKey, now + 3600000],
+    });
     await tx.execute({
       sql: "INSERT INTO rate_limits(key,count,expires_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1",
       args: [key, now + 3600000],
@@ -162,18 +160,22 @@ export async function joinRoom(
   id: string,
   name: unknown,
   existing: string | undefined,
+  joinKey?: string,
 ) {
-  const nickname = cleanName(name);
-  const secret = token();
-  return write(async (tx) => {
+  if (joinKey !== undefined && !validSecret(joinKey))
+    throw new AppError("参加情報を確認してください。");
+  const secret = joinKey || token();
+  return writeTransaction(async (tx) => {
     const row = await readRoom(tx, id);
-    if (existing) {
-      const old = await tx.execute({
-        sql: "SELECT id FROM players WHERE room_id=? AND auth_hash=?",
-        args: [id, hash(existing)],
-      });
-      if (old.rows.length) return { secret: existing };
-    }
+    for (const candidate of [joinKey, existing])
+      if (candidate && validSecret(candidate)) {
+        const old = await tx.execute({
+          sql: "SELECT id FROM players WHERE room_id=? AND auth_hash=?",
+          args: [id, hash(candidate)],
+        });
+        if (old.rows.length) return { secret: candidate };
+      }
+    const nickname = cleanName(name);
     if (row.status !== "lobby")
       throw new AppError("受付は終了しました。幹事にお声がけください。", 409);
     const count = await tx.execute({
@@ -276,6 +278,19 @@ export async function getView(
     winners: players.filter((p) => p.bingoAt !== null),
   };
   if (hostSecret) view.players = players;
+  if (hostSecret) {
+    view.paymentStatus =
+      room.plan === "event"
+        ? "paid"
+        : String(
+            (
+              await store.execute({
+                sql: "SELECT status FROM checkout_orders WHERE room_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                args: [id],
+              })
+            ).rows[0]?.status || "none",
+          );
+  }
   if (playerSecret) {
     const index = rows.findIndex((p) => p.card !== null);
     if (index !== -1)
@@ -292,10 +307,16 @@ export async function hostAction(
   secret: string | null,
   input: Record<string, unknown>,
 ) {
-  await write(async (tx) => {
+  await writeTransaction(async (tx) => {
     const row = await readRoom(tx, id);
     checkHost(row, secret);
     const room = roomFrom(row);
+    if (input.expectedGameNumber !== room.gameNumber)
+      throw new AppError(
+        "別のゲームに切り替わっています。最新の画面を確認してください。",
+        409,
+        "STALE_GAME",
+      );
     switch (input.action) {
       case "draw": {
         if (room.status === "finished")
@@ -335,6 +356,7 @@ export async function hostAction(
         room.status = "finished";
         break;
       case "reset":
+        room.gameNumber++;
         room.status = "lobby";
         room.drawn = [];
         room.prizes = room.prizes.map((p) => ({ ...p, playerId: null }));
@@ -344,10 +366,21 @@ export async function hostAction(
         });
         break;
       case "prize": {
+        if (
+          typeof input.prizeId !== "string" ||
+          !/^[0-9a-f-]{36}$/i.test(input.prizeId)
+        )
+          throw new AppError("景品の登録情報を確認してください。");
+        const previous = room.prizes.find((p) => p.id === input.prizeId);
+        if (previous) {
+          if (previous.name !== cleanName(input.name, 40))
+            throw new AppError("景品の内容が変わっています。", 409);
+          return;
+        }
         if (room.prizes.length >= 30)
           throw new AppError("景品は30個まで登録できます。");
         room.prizes.push({
-          id: randomUUID(),
+          id: input.prizeId,
           name: cleanName(input.name, 40),
           playerId: null,
         });
@@ -369,15 +402,32 @@ export async function hostAction(
         prize.playerId = String(input.playerId);
         break;
       }
+      case "unaward": {
+        const prize = room.prizes.find((p) => p.id === input.prizeId);
+        if (!prize) throw new AppError("景品が見つかりません。", 404);
+        prize.playerId = null;
+        break;
+      }
+      case "remove_prize": {
+        const prize = room.prizes.find((p) => p.id === input.prizeId);
+        if (!prize || prize.playerId)
+          throw new AppError(
+            "割り当て済みの景品は、先に当選者を変更してください。",
+            409,
+          );
+        room.prizes = room.prizes.filter((p) => p.id !== input.prizeId);
+        break;
+      }
       default:
         throw new AppError("操作を確認してください。");
     }
     await tx.execute({
-      sql: "UPDATE rooms SET status=?,drawn=?,prizes=?,revision=revision+1 WHERE id=?",
+      sql: "UPDATE rooms SET status=?,drawn=?,prizes=?,game_number=?,revision=revision+1 WHERE id=?",
       args: [
         room.status,
         JSON.stringify(room.drawn),
         JSON.stringify(room.prizes),
+        room.gameNumber,
         id,
       ],
     });
@@ -398,35 +448,4 @@ export async function printableCards(id: string, secret: string | null) {
     name: String(p.name),
     card: JSON.parse(String(p.card)) as Card,
   }));
-}
-
-export async function upgradeRoom(roomId: string, sessionId: string) {
-  await write(async (tx) => {
-    validRoomId(roomId);
-    const room = (
-      await tx.execute({
-        sql: "SELECT * FROM rooms WHERE id=?",
-        args: [roomId],
-      })
-    ).rows[0];
-    if (!room) throw new AppError("イベントが見つかりません。", 404);
-    if (room.checkout_id !== sessionId)
-      throw new AppError("決済とイベントの対応を確認できません。", 409);
-    const existing = await tx.execute({
-      sql: "SELECT session_id FROM payments WHERE session_id=?",
-      args: [sessionId],
-    });
-    if (existing.rows.length) return;
-    await tx.execute({
-      sql: "INSERT INTO payments(session_id,room_id,paid_at) VALUES(?,?,?)",
-      args: [sessionId, roomId, Date.now()],
-    });
-    await tx.execute({
-      sql: "UPDATE rooms SET plan='event',expires_at=?,revision=revision+1 WHERE id=?",
-      args: [
-        Math.max(Number(room.expires_at), Date.now() + 30 * 86400000),
-        roomId,
-      ],
-    });
-  });
 }

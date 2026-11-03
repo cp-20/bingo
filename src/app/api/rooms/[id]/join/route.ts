@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { joinRoom } from "@/lib/service";
+import { getView, joinRoom, validSecret, AppError } from "@/lib/service";
 import { body, failure, sameOrigin, noStore } from "@/lib/http";
 export const runtime = "nodejs";
 export async function POST(
@@ -10,12 +10,19 @@ export async function POST(
     sameOrigin(request);
     const { id } = await context.params;
     const data = await body(request);
+    if (!validSecret(data.joinKey))
+      throw new AppError("参加画面を開き直してお試しください。");
     const result = await joinRoom(
       id,
       data.name,
       request.cookies.get(`bingo_${id}`)?.value,
+      data.joinKey,
     );
-    const response = NextResponse.json({ ok: true }, { headers: noStore });
+    const room = await getView(id, null, result.secret);
+    const response = NextResponse.json(
+      { room, playerKey: result.secret },
+      { headers: noStore },
+    );
     response.cookies.set(`bingo_${id}`, result.secret, {
       httpOnly: true,
       secure:

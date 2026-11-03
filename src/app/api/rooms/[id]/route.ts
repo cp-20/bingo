@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getView } from "@/lib/service";
-import { bearer, failure, noStore } from "@/lib/http";
+import { bearer, failure, noStore, playerCredential } from "@/lib/http";
 import { paymentReady } from "@/lib/payments";
 export const runtime = "nodejs";
 export async function GET(
@@ -14,10 +14,10 @@ export async function GET(
     const view = await getView(
       id,
       secret,
-      request.cookies.get(`bingo_${id}`)?.value,
+      playerCredential(request, id),
       revision === null ? undefined : Number(revision),
     );
-    if (!view) return new NextResponse(null, { status: 304, headers: noStore });
+    if (!view) return new NextResponse(null, { status: 204, headers: noStore });
     if (secret) view.paymentReady = paymentReady();
     return NextResponse.json(view, { headers: noStore });
   } catch (error) {

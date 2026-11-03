@@ -59,11 +59,11 @@ export default function Landing() {
               <span>ビンゴ</span>しよう<span className="hero-period">。</span>
             </h1>
             <p>
-              紙も、アプリも、むずかしい準備もいらない。
+              紙もアプリも、準備いらず。
               <br />
-              QRコードひとつで、みんなのスマホがビンゴカードに。
+              QRコードで、スマホがビンゴカードに。
               <br />
-              幹事もいっしょに楽しめる、あたらしいビンゴです。
+              幹事もいっしょに楽しもう。
             </p>
             <div className="hero-buttons">
               <button className="button primary large" onClick={open}>
