@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if git diff --cached --unified=0 | rg --quiet '^\+[^+].*([sr]k_(live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,})'; then
+  echo 'A payment key or webhook secret may be staged. Remove it before committing.' >&2
+  exit 1
+fi
