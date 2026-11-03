@@ -3,7 +3,7 @@ import "./globals.css";
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: {
-    default: "BINGO ROOM｜集まったら、ビンゴしよう。",
+    default: "BINGO ROOM｜QRで参加するイベント用ビンゴ",
     template: "%s｜BINGO ROOM",
   },
   description:
@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#164c3d",
+  themeColor: "#ffffff",
 };
 export default function RootLayout({
   children,

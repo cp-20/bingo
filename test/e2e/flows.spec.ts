@@ -24,6 +24,12 @@ async function room(request: APIRequestContext, title: string) {
   expect(res.status()).toBe(201);
   return res.json() as Promise<{ id: string; hostToken: string }>;
 }
+// Only synthetic fixtures are captured. Auth fragments are removed by the app before capture.
+async function visual(page: Page, name: string) {
+  if (process.env.BINGO_TEST_BROWSER === "webkit") return;
+  const shot = await page.screenshot({ type: "jpeg", quality: 55 });
+  console.log("BINGO_VISUAL:" + name + ":" + shot.toString("base64") + ":END_BINGO_VISUAL");
+}
 async function noOverflow(page: Page) {
   const result = await page.evaluate(() => ({
     fits: document.documentElement.scrollWidth <= innerWidth + 1,
@@ -72,12 +78,15 @@ test("landing works at 320px and desktop; dialog restores keyboard focus", async
     path: "test-results/landing-desktop.png",
     fullPage: true,
   });
+  await visual(page, "landing-desktop");
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
   await page.screenshot({
     path: "test-results/landing-mobile.png",
     fullPage: true,
   });
+  await accessible(page);
+  await visual(page, "landing-mobile");
   expect(errors).toEqual([]);
 });
 test("host and mobile guest create, join, draw, recover after storage loss, and reconnect", async ({
@@ -121,15 +130,17 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   await page.bringToFront();
   const draw = page.getByRole("button", { name: "最初の番号をひく" });
   await expect(draw).toBeEnabled();
+  page.once("dialog", dialog => dialog.dismiss());
+  await draw.click();
+  await expect(draw).toBeEnabled();
+  expect((await (await request.get(`/api/rooms/${event.id}`)).json()).drawn).toHaveLength(0);
+  page.once("dialog", dialog => dialog.accept());
   await draw.click();
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
   ).toBeEnabled();
-  await expect(
-    page
-      .getByRole("heading", { name: "新規受付は終了しました" })
-      .filter({ visible: true }),
-  ).toBeVisible();
+  await expect(page.locator(".card-return")).not.toHaveAttribute("open", "");
+  await expect(page.getByRole("heading", { name: "新規受付は終了しました" })).toBeHidden();
   await page.context().setOffline(true);
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
@@ -145,6 +156,7 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     path: "test-results/host-desktop.png",
     fullPage: true,
   });
+  await visual(page, "host-desktop");
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
   await page.screenshot({
@@ -157,6 +169,16 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   );
   await accessible(guest);
   await noOverflow(guest);
+  for (const width of [320,390]) {
+    await guest.setViewportSize({width,height:800});
+    await expect(guest.getByRole("cell")).toHaveCount(25);
+    const cardBounds = await guest.getByRole("table").boundingBox();
+    const callBounds = await guest.locator(".participant-latest").boundingBox();
+    expect(callBounds!.y + callBounds!.height).toBeLessThan(cardBounds!.y);
+    expect(cardBounds!.y + cardBounds!.height).toBeLessThanOrEqual(800);
+    await noOverflow(guest);
+  }
+  await visual(guest, "card-mobile");
   await guest.screenshot({
     path: "test-results/card-mobile.png",
     fullPage: true,
@@ -211,6 +233,7 @@ test("projector and print views are readable and do not expose host credentials"
     path: "test-results/screen-desktop.png",
     fullPage: true,
   });
+  await visual(page, "screen-lobby");
   expect(await page.content()).not.toContain(event.hostToken);
   const joined = await request.post(`/api/rooms/${event.id}/join`, {
     headers: { Origin: "http://127.0.0.1:3100" },
@@ -325,4 +348,46 @@ test("300 participants can poll at the planned rate while the host draws", async
   } finally {
     store.close();
   }
+});
+
+test("a full venue keeps the called number visible and lets the host find long names", async ({page,request}) => {
+  const event = await room(request, "合同忘年会・営業部と開発部のビンゴ大会");
+  const store = createClient({url:process.env.BINGO_QA_DATABASE_URL!});
+  try {
+    await store.batch([
+      {sql:"UPDATE rooms SET plan='event',status='playing',drawn=?,revision=revision+1 WHERE id=?",args:[JSON.stringify(Array.from({length:75},(_,i)=>i+1)),event.id]},
+      ...Array.from({length:300},(_,i)=>({
+        sql:"INSERT INTO players(id,room_id,auth_hash,name,name_key,card,bingo_at,joined_at) VALUES(?,?,?,?,?,?,?,?)",
+        args:[randomUUID(),event.id,hash(randomBytes(32).toString("base64url")),
+          "営業部のながいニックネーム"+String(i).padStart(3,"0"),"guest-"+i,JSON.stringify(makeCard()),75,Date.now()+i]
+      }))
+    ],"write");
+  } finally { store.close(); }
+  await page.setViewportSize({width:1280,height:800});
+  await page.goto("/screen/"+event.id);
+  await expect(page.locator(".screen-draw>strong")).toHaveText("75");
+  await expect(page.locator(".screen-winners")).toContainText("300人がビンゴ");
+  await expect(page.locator(".screen-winners b")).toHaveCount(6);
+  await expect(page.locator(".number-band>div>span")).toHaveCount(75);
+  await expect(page.getByAltText("イベント参加用QRコード")).toBeHidden();
+  for (const height of [720,800,1080]) {
+    await page.setViewportSize({width:1280,height});
+    const bounds=await page.locator(".number-board").boundingBox();
+    expect(bounds!.y+bounds!.height).toBeLessThanOrEqual(height);
+    await noOverflow(page);
+  }
+  await page.setViewportSize({width:1280,height:800});
+  await accessible(page);
+  await visual(page,"screen-playing");
+  await page.screenshot({path:"test-results/screen-playing.png",fullPage:true});
+  await page.goto("/host/"+event.id+"#key="+event.hostToken);
+  await expect(page.getByRole("heading",{name:"幹事の進行画面"})).toHaveCount(0);
+  await expect(page.locator(".big-number")).toHaveText("75");
+  await page.locator(".participant-register>summary").click();
+  await page.getByLabel("参加者名で検索").fill("299");
+  await expect(page.locator(".player-row")).toHaveCount(1);
+  await expect(page.locator(".player-row")).toContainText("299");
+  await page.setViewportSize({width:320,height:800});
+  await noOverflow(page);
+  await accessible(page);
 });

@@ -11,12 +11,7 @@ export function Logo({ light = false }: { light?: boolean }) {
       className={`logo ${light ? "light" : ""}`}
       aria-label="BINGO ROOM ホーム"
     >
-      <span className="logo-mark">
-        <i />
-        <i />
-        <i />
-        <i />
-      </span>
+      <span className="logo-mark" aria-hidden="true">B</span>
       <span>
         BINGO<span className="logo-room">ROOM</span>
       </span>
@@ -57,9 +52,7 @@ export function BingoCard({
                 className={`${number === 0 ? "free" : ""} ${drawn.includes(number) ? "marked" : ""}`}
               >
                 {number === 0 ? (
-                  <span className="free-symbol">
-                    ✦<small>FREE</small>
-                  </span>
+                  <span className="free-symbol">FREE</span>
                 ) : (
                   number
                 )}
@@ -72,18 +65,12 @@ export function BingoCard({
   );
 }
 export function NumberBoard({ drawn }: { drawn: number[] }) {
-  return (
-    <div className="number-board" aria-label="抽選済み番号">
-      {Array.from({ length: 75 }, (_, i) => i + 1).map((n) => (
-        <span
-          key={n}
-          className={`${drawn.includes(n) ? "hit" : ""} ${drawn.at(-1) === n ? "latest" : ""}`}
-        >
-          {n}
-        </span>
-      ))}
-    </div>
-  );
+  return <div className="number-board" role="group" aria-label="抽選済み番号">
+    {["B","I","N","G","O"].map((letter,column)=><div className="number-band" key={letter}>
+      <b aria-hidden="true">{letter}</b>
+      <div>{Array.from({length:15},(_,i)=>column*15+i+1).map(n=><span key={n} className={(drawn.includes(n)?"hit":"")+(drawn.at(-1)===n?" latest":"")}>{n}<span className="sr-only">{drawn.includes(n)?"、抽選済み":"、未抽選"}</span></span>)}</div>
+    </div>)}
+  </div>;
 }
 export function CreateRoom({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
@@ -160,10 +147,9 @@ export function CreateRoom({ onClose }: { onClose: () => void }) {
       >
         ×
       </button>
-      <span className="eyebrow">LET’S GET TOGETHER</span>
-      <h2 id="create-title">今日は、なんの集まり？</h2>
+      <h2 id="create-title">イベントをつくる</h2>
       <p className="muted">
-        名前をつけたら、会場のできあがり。
+        イベント名を入力してください。
         <br />
         30人まで無料、クレジットカードも不要です。
       </p>
@@ -260,7 +246,7 @@ export function Footer() {
   return (
     <footer className="footer">
       <Logo />
-      <span className="footer-tagline">いい時間に、いいビンゴを。</span>
+      
       <nav aria-label="フッター">
         <Link href="/guide">使い方</Link>
         <Link href="/terms">利用規約</Link>
