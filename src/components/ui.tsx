@@ -11,7 +11,9 @@ export function Logo({ light = false }: { light?: boolean }) {
       className={`logo ${light ? "light" : ""}`}
       aria-label="BINGO ROOM ホーム"
     >
-      <span className="logo-mark" aria-hidden="true">B</span>
+      <span className="logo-mark" aria-hidden="true">
+        B
+      </span>
       <span>
         BINGO<span className="logo-room">ROOM</span>
       </span>
@@ -20,6 +22,30 @@ export function Logo({ light = false }: { light?: boolean }) {
 }
 export function Arrow({ diagonal = false }: { diagonal?: boolean }) {
   return <span aria-hidden="true">{diagonal ? "↗" : "→"}</span>;
+}
+export function DrawBall({
+  number,
+  className = "",
+}: {
+  number?: number;
+  className?: string;
+}) {
+  const letter = number ? "BINGO"[Math.floor((number - 1) / 15)] : "";
+  return (
+    <div
+      className={`draw-ball ${className}`}
+      data-ball={letter || "empty"}
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div className="ball-visual" key={number || 0}>
+        <span className="ball-letter" aria-hidden="true">
+          {letter || "BINGO"}
+        </span>
+        <strong className="draw-ball-number">{number || "—"}</strong>
+      </div>
+    </div>
+  );
 }
 export function BingoCard({
   card,
@@ -30,6 +56,12 @@ export function BingoCard({
   drawn?: number[];
   mini?: boolean;
 }) {
+  const previous = useRef(drawn);
+  const last = drawn.at(-1);
+  const justDrawn = last !== previous.current.at(-1) ? last : undefined;
+  useEffect(() => {
+    previous.current = drawn;
+  }, [drawn]);
   return (
     <div className={`bingo-card ${mini ? "mini" : ""}`}>
       <div className="card-letters" aria-hidden="true">
@@ -49,10 +81,21 @@ export function BingoCard({
                     ? "フリーマス、開いています"
                     : `${number}${drawn.includes(number) ? "、開いています" : "、まだ開いていません"}`
                 }
-                className={`${number === 0 ? "free" : ""} ${drawn.includes(number) ? "marked" : ""}`}
+                className={`${number === 0 ? "free" : ""} ${drawn.includes(number) ? "marked" : ""} ${number === justDrawn ? "new-mark" : ""}`}
               >
+                {drawn.includes(number) && (
+                  <svg
+                    className="mark-ring"
+                    viewBox="0 0 100 100"
+                    aria-hidden="true"
+                  >
+                    <circle cx="50" cy="50" r="43" />
+                  </svg>
+                )}
                 {number === 0 ? (
-                  <span className="free-symbol">FREE</span>
+                  <span className="free-symbol">
+                    <span aria-hidden="true">★</span>FREE
+                  </span>
                 ) : (
                   number
                 )}
@@ -65,12 +108,37 @@ export function BingoCard({
   );
 }
 export function NumberBoard({ drawn }: { drawn: number[] }) {
-  return <div className="number-board" role="group" aria-label="抽選番号一覧（1〜75）">
-    {["B","I","N","G","O"].map((letter,column)=><div className="number-band" key={letter}>
-      <b aria-hidden="true">{letter}</b>
-      <div>{Array.from({length:15},(_,i)=>column*15+i+1).map(n=><span key={n} className={(drawn.includes(n)?"hit":"")+(drawn.at(-1)===n?" latest":"")}>{n}<span className="sr-only">{drawn.includes(n)?"、抽選済み":"、未抽選"}</span></span>)}</div>
-    </div>)}
-  </div>;
+  return (
+    <div
+      className="number-board"
+      role="group"
+      aria-label="抽選番号一覧（1〜75）"
+    >
+      {["B", "I", "N", "G", "O"].map((letter, column) => (
+        <div className="number-band" key={letter} data-letter={letter}>
+          <b aria-hidden="true">{letter}</b>
+          <div>
+            {Array.from({ length: 15 }, (_, i) => column * 15 + i + 1).map(
+              (n) => (
+                <span
+                  key={n}
+                  className={
+                    (drawn.includes(n) ? "hit" : "") +
+                    (drawn.at(-1) === n ? " latest" : "")
+                  }
+                >
+                  {n}
+                  <span className="sr-only">
+                    {drawn.includes(n) ? "、抽選済み" : "、未抽選"}
+                  </span>
+                </span>
+              ),
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 export function CreateRoom({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
@@ -246,7 +314,7 @@ export function Footer() {
   return (
     <footer className="footer">
       <Logo />
-      
+
       <nav aria-label="フッター">
         <Link href="/guide">使い方</Link>
         <Link href="/terms">利用規約</Link>

@@ -1,0 +1,78 @@
+.demo-bar {
+  background: #f5f5f1;
+  border-bottom: 1px solid #d4d4cf;
+  padding: 10px max(5%, 16px);
+  color: #202020;
+  font-size: 13px;
+}
+.demo-bar summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+.demo-bar summary::-webkit-details-marker {
+  display: none;
+}
+.demo-bar summary::after {
+  content: "▾";
+}
+.demo-bar details[open] summary::after {
+  content: "▴";
+}
+.demo-toggle {
+  margin-left: auto;
+}
+.demo-bar details > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.demo-bar summary > b {
+  background: #202020;
+  color: white;
+  border-radius: 2px;
+  padding: 4px 9px;
+}
+.demo-bar nav {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.demo-bar nav a,
+.demo-bar nav button {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid #777;
+  border-radius: 3px;
+  background: white;
+  color: #202020;
+  cursor: pointer;
+  font: inherit;
+}
+.demo-bar nav a[aria-current="page"] {
+  background: #202020;
+  color: white;
+}
+.demo-bar details > small {
+  display: block;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+@media print {
+  .demo-bar {
+    display: none;
+  }
+}
+:fullscreen .demo-bar {
+  display: none;
+}

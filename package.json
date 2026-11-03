@@ -15,7 +15,9 @@
     "db:cleanup": "node --env-file-if-exists=.env.local --import tsx scripts/cleanup-db.ts",
     "db:backup": "node --env-file-if-exists=.env.local --import tsx scripts/backup-db.ts",
     "db:restore": "node --import tsx scripts/restore-db.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "build:demo": "node scripts/build-demo.mjs",
+    "test:demo": "playwright test --config playwright.demo.config.ts"
   },
   "dependencies": {
     "@libsql/client": "0.18.0",
@@ -32,6 +34,7 @@
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "esbuild": "0.28.2",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
