@@ -125,6 +125,11 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
   ).toBeEnabled();
+  await expect(
+    page
+      .getByRole("heading", { name: "新規受付は終了しました" })
+      .filter({ visible: true }),
+  ).toBeVisible();
   await page.context().setOffline(true);
   await expect(
     page.getByRole("button", { name: "次の番号をひく" }),
@@ -147,7 +152,9 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     fullPage: true,
   });
   await guest.bringToFront();
-  await expect(guest.locator(".participant-latest")).toContainText("1 / 75 回目");
+  await expect(guest.locator(".participant-latest")).toContainText(
+    "1 / 75 回目",
+  );
   await accessible(guest);
   await noOverflow(guest);
   await guest.screenshot({

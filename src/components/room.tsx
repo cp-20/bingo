@@ -792,15 +792,27 @@ function Invitation({
   return (
     <section className={`panel join-panel ${className}`}>
       <div className="panel-heading">
-        <h2>参加者を招待</h2>
-        <span>SCAN & JOIN</span>
+        <h2>
+          {view.status === "lobby" ? "参加者を招待" : "新規受付は終了しました"}
+        </h2>
+        <span>{view.status === "lobby" ? "SCAN & JOIN" : "YOUR CARD"}</span>
       </div>
       <QrCode url={joinUrl} />
       <b className="join-code-label">{view.id}</b>
       <p>
-        QRを読むか、トップページで
-        <br />
-        この参加コードを入力してください。
+        {view.status === "lobby" ? (
+          <>
+            QRを読むか、トップページで
+            <br />
+            この参加コードを入力してください。
+          </>
+        ) : (
+          <>
+            参加済みの方は、同じブラウザで
+            <br />
+            カードに戻れます。
+          </>
+        )}
       </p>
       <button
         className="button outline wide small"
@@ -1111,7 +1123,11 @@ function Screen({ view, joinUrl }: { view: RoomView; joinUrl: string }) {
         <aside className="screen-join">
           <QrCode url={joinUrl} />
           <b>{view.id}</b>
-          <span>QRコードから参加</span>
+          <span>
+            {view.status === "lobby"
+              ? "QRコードから参加"
+              : "参加済みカードへ戻る"}
+          </span>
           <small>
             {view.count}人が参加中 · ビンゴ {view.winners.length}人
           </small>
