@@ -245,7 +245,7 @@ test("projector and print views are readable and do not expose host credentials"
     path: "test-results/screen-desktop.png",
     fullPage: true,
   });
-  await expect(page.locator(".screen-address")).toHaveText(
+  await expect(page.locator(".venue-qr>small")).toHaveText(
     "http://127.0.0.1:3100",
   );
   expect(await page.content()).not.toContain(event.hostToken);
@@ -296,7 +296,8 @@ test("300 participants can poll at the planned rate while the host draws", async
     );
     const started = performance.now(),
       timings: number[] = [],
-      revisions: (number | undefined)[] = Array(300);
+      revisions: (number | undefined)[] = Array(300),
+      liveRevisions: (number | undefined)[] = Array(300);
     let failures = 0,
       inFlight = 0,
       index = 0,
@@ -309,7 +310,7 @@ test("300 participants can poll at the planned rate while the host draws", async
         inFlight++;
         pending.push(
           fetch(
-            `http://127.0.0.1:3100/api/rooms/${event.id}?view=card${revisions[client] ? `&revision=${revisions[client]}` : ""}`,
+            `http://127.0.0.1:3100/api/rooms/${event.id}/sync?view=card${revisions[client] ? `&revision=${revisions[client]}` : ""}${liveRevisions[client] ? `&liveRevision=${liveRevisions[client]}` : ""}`,
             {
               headers: { "X-Player-Key": keys[client] },
               signal: AbortSignal.timeout(5000),
@@ -317,10 +318,13 @@ test("300 participants can poll at the planned rate while the host draws", async
           )
             .then(async (response) => {
               if (response.status === 200) {
-                const view = await response.json();
-                expect(view.me.name).toBe(`Guest ${client}`);
-                expect(view.winners).toEqual([]);
-                revisions[client] = view.revision;
+                const { room: view, live } = await response.json();
+                if (view) {
+                  expect(view.me.name).toBe(`Guest ${client}`);
+                  expect(view.winners).toEqual([]);
+                  revisions[client] = view.revision;
+                }
+                if (live) liveRevisions[client] = live.revision;
               } else if (response.status !== 204) failures++;
               timings.push(performance.now() - begin);
             })
@@ -343,7 +347,7 @@ test("300 participants can poll at the planned rate while the host draws", async
         expect(result.status()).toBe(200);
         draws++;
       }
-      await delay(16);
+      await delay(10);
     }
     await Promise.all(pending);
     timings.sort((a, b) => a - b);
@@ -405,16 +409,18 @@ test("a full venue keeps the called number visible and lets the host find long n
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/screen/" + event.id);
-  await expect(page.locator(".screen-draw .draw-ball-number")).toHaveText("75");
-  await expect(page.locator(".screen-winners")).toContainText("300人がビンゴ");
-  await expect(page.locator(".screen-winner-names b")).toHaveCount(6);
-  await expect(page.locator(".number-band>div>span")).toHaveCount(75);
+  await expect(page.locator(".bingo-called .draw-ball-number")).toHaveText(
+    "75",
+  );
+  await expect(page.locator(".show-winners")).toContainText(/300人\s*がビンゴ/);
+  await expect(page.locator(".winner-spotlights strong")).toHaveCount(4);
+  await expect(page.locator(".number-band>div>span")).toHaveCount(0);
   await expect(page.getByAltText("イベント参加用QRコード")).toBeHidden();
   for (const height of [720, 800, 1080]) {
     await page.setViewportSize({ width: 1280, height });
-    const bounds = await page.locator(".number-board").boundingBox();
+    const bounds = await page.locator(".venue-footer").boundingBox();
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(height);
-    const winnerBounds = await page.locator(".screen-winners").boundingBox();
+    const winnerBounds = await page.locator(".show-winners").boundingBox();
     expect(winnerBounds!.y + winnerBounds!.height).toBeLessThanOrEqual(height);
     await noOverflow(page);
   }
@@ -424,6 +430,20 @@ test("a full venue keeps the called number visible and lets the host find long n
     path: "test-results/screen-playing.png",
     fullPage: true,
   });
+  const history = await request.post(`/api/rooms/${event.id}/action`, {
+    headers: {
+      Origin: "http://127.0.0.1:3100",
+      Authorization: `Bearer ${event.hostToken}`,
+    },
+    data: { action: "stage", mode: "history", expectedGameNumber: 1 },
+  });
+  expect(history.status()).toBe(200);
+  await expect(page.locator(".number-band>div>span")).toHaveCount(75);
+  for (const height of [720, 800]) {
+    await page.setViewportSize({ width: 1280, height });
+    const board = await page.locator(".number-board").boundingBox();
+    expect(board!.y + board!.height).toBeLessThan(height);
+  }
   await page.goto("/host/" + event.id + "#key=" + event.hostToken);
   await expect(page.locator(".big-number .draw-ball-number")).toHaveText("75");
   await page.locator(".participant-register>summary").click();

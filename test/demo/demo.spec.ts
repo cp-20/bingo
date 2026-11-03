@@ -60,9 +60,9 @@ test("the actual screens run locally, share draws across tabs, preserve cards, a
   await page.bringToFront();
   await page.screenshot({ path: "test-results/demo-host.png", fullPage: true });
   await page.goto("/screen/DEMO8888/");
-  await expect(page.locator(".screen-draw .draw-ball-number")).not.toHaveText(
-    "?",
-  );
+  await expect(
+    page.locator(".number-spotlight .draw-ball-number"),
+  ).not.toHaveText("?");
   const screen = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
     .analyze();
@@ -89,7 +89,7 @@ test("reset and all 75 draws are consistent with the shared bingo rules", async 
   ).toHaveText("6人");
   await page.getByText("保存・イベント設定", { exact: true }).click();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: /リハーサル・次のゲームへ/ }).click();
+  await page.getByRole("button", { name: /次のゲームへ/ }).click();
   await expect(page.locator(".event-status")).toContainText("第2ゲーム");
   await expect(page.locator(".number-board .hit")).toHaveCount(0);
   await expect(

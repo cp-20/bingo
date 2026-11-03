@@ -126,6 +126,7 @@ test("double clicks draw once; ties are ranked equally; reset preserves cards", 
     expectedGameNumber: 1,
     action: "unaward",
     prizeId: prize.id,
+    expectedAwardId:(await getView(room.id,room.hostToken))!.prizes[0].awardId,
   });
   assert.equal(
     (await getView(room.id, room.hostToken))!.prizes[0].playerId,

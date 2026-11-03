@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Card, Prize, RoomView } from "@/lib/game";
+import type { Card, Prize, RoomView, CommunityFeed } from "@/lib/game";
 import { cardStatus } from "@/lib/card";
 import {
   api,
@@ -10,9 +10,14 @@ import {
   savedSecret,
   saveSecret,
   RequestError,
+  notifyRoom,
 } from "@/lib/client";
 import { Arrow, BingoCard, DrawBall, Logo, NumberBoard } from "./ui";
 import { Celebration, useCelebration } from "./celebration";
+
+import VenueStage from "./venue-stage";
+import { Community, Reactions, useCommunity } from "./community";
+import { PrizePicture, PrizePhotoUpload, PrizeGallery } from "./prizes";
 
 type Role = "host" | "player" | "screen";
 function useRoomKey(id: string, role: Role) {
@@ -42,6 +47,14 @@ function useRoomKey(id: string, role: Role) {
 }
 function useRoom(id: string, role: Role, key: string | null | undefined) {
   const [view, setView] = useState<RoomView>();
+  const [live, setLive] = useState<CommunityFeed>();
+  const liveRef = useRef<CommunityFeed | undefined>(undefined);
+  const acceptLive = useCallback((next: CommunityFeed) => {
+    if (!liveRef.current || next.revision >= liveRef.current.revision) {
+      liveRef.current = next;
+      setLive(next);
+    }
+  }, []);
   const viewRef = useRef<RoomView | undefined>(undefined);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
@@ -79,7 +92,7 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
       inFlight = true;
       current = new AbortController();
       let terminal = false,
-        wait = 4000;
+        wait = role === "screen" ? 1000 : role === "host" ? 1800 : 3500;
       try {
         const revision = first ? undefined : viewRef.current?.revision;
         const headers: Record<string, string> = key
@@ -88,12 +101,16 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
                 role === "host" ? `Bearer ${key}` : key,
             }
           : {};
-        const next = await api<RoomView | null>(
-          `/api/rooms/${id}?${new URLSearchParams({ ...(revision ? { revision: String(revision) } : {}), ...(role === "player" ? { view: "card" } : {}) })}`,
+        const next = await api<{
+          room: RoomView | null;
+          live: CommunityFeed | null;
+        } | null>(
+          `/api/rooms/${id}/sync?${new URLSearchParams({ ...(revision ? { revision: String(revision) } : {}), ...(!first && liveRef.current ? { liveRevision: String(liveRef.current.revision) } : {}), ...(role === "player" ? { view: "card" } : {}) })}`,
           { headers, signal: current.signal },
         );
         if (stopped) return;
-        if (next) acceptView(next);
+        if (next?.room) acceptView(next.room);
+        if (next?.live) acceptLive(next.live);
         setError("");
         setConnected(true);
         setLastSync(Date.now());
@@ -116,7 +133,7 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
       } finally {
         inFlight = false;
         if (!stopped && !terminal && navigator.onLine && !document.hidden)
-          timer = setTimeout(poll, wait + Math.random() * 1500);
+          timer = setTimeout(poll, wait + Math.random() * 250);
       }
     }
     const resume = () => {
@@ -138,6 +155,15 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
     };
     void poll();
     if (!navigator.onLine) resume();
+    const channel =
+      typeof BroadcastChannel !== "undefined"
+        ? new BroadcastChannel(`bingo-room-${id}`)
+        : null;
+    if (channel)
+      channel.onmessage = () => {
+        clearTimeout(timer);
+        void poll();
+      };
     window.addEventListener("online", resume);
     window.addEventListener("offline", resume);
     document.addEventListener("visibilitychange", resume);
@@ -145,15 +171,25 @@ function useRoom(id: string, role: Role, key: string | null | undefined) {
       stopped = true;
       clearTimeout(timer);
       current?.abort();
+      channel?.close();
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", resume);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [id, key, role, generation, acceptView]);
-  return { view, error, connected, lastSync, refresh, acceptView };
+  }, [id, key, role, generation, acceptView, acceptLive]);
+  return {
+    view,
+    live,
+    acceptLive,
+    error,
+    connected,
+    lastSync,
+    refresh,
+    acceptView,
+  };
 }
 
-function Connection({ connected }: { connected: boolean }) {
+export function Connection({ connected }: { connected: boolean }) {
   return (
     <span className={`connection ${connected ? "online" : ""}`}>
       <i />
@@ -169,7 +205,7 @@ function RoomError({ error, refresh }: { error: string; refresh: () => void }) {
     </div>
   ) : null;
 }
-function QrCode({ url }: { url: string }) {
+export function QrCode({ url }: { url: string }) {
   const [image, setImage] = useState("");
   useEffect(() => {
     let active = true;
@@ -201,11 +237,16 @@ function QrCode({ url }: { url: string }) {
 
 export default function RoomClient({ id, role }: { id: string; role: Role }) {
   const { key, remember } = useRoomKey(id, role);
-  const { view, error, connected, lastSync, refresh, acceptView } = useRoom(
-    id,
-    role,
-    key,
-  );
+  const {
+    view,
+    live,
+    acceptLive,
+    error,
+    connected,
+    lastSync,
+    refresh,
+    acceptView,
+  } = useRoom(id, role, key);
   const [origin, setOrigin] = useState("");
   const [toast, setToast] = useState("");
   useEffect(() => setOrigin(location.origin), []);
@@ -291,6 +332,8 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
       {role === "host" ? (
         <Host
           view={view}
+          live={live}
+          onLive={acceptLive}
           hostKey={key!}
           refresh={refresh}
           joinUrl={joinUrl}
@@ -299,10 +342,17 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
           onView={acceptView}
         />
       ) : role === "screen" ? (
-        <Screen view={view} joinUrl={joinUrl} connected={connected} />
+        <VenueStage
+          view={view}
+          live={live}
+          joinUrl={joinUrl}
+          connected={connected}
+        />
       ) : (
         <Participant
           view={view}
+          live={live}
+          onLive={acceptLive}
           refresh={refresh}
           connected={connected}
           playerKey={key || null}
@@ -330,6 +380,8 @@ export default function RoomClient({ id, role }: { id: string; role: Role }) {
 
 function Host({
   view,
+  live,
+  onLive,
   hostKey,
   refresh,
   joinUrl,
@@ -338,6 +390,8 @@ function Host({
   onView,
 }: {
   view: RoomView;
+  live?: CommunityFeed;
+  onLive: (live: CommunityFeed) => void;
   hostKey: string;
   refresh: () => void;
   joinUrl: string;
@@ -345,6 +399,7 @@ function Host({
   connected: boolean;
   onView: (view: RoomView) => void;
 }) {
+  const community = useCommunity(view, hostKey, null, onLive);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [prizeName, setPrizeName] = useState("");
@@ -382,6 +437,7 @@ function Host({
         },
       );
       onView(data.room);
+      notifyRoom(view.id);
       return true;
     } catch (error) {
       setError(
@@ -467,7 +523,7 @@ function Host({
   function reset() {
     if (
       confirm(
-        "抽選結果と景品の割り当てをリセットします。参加者のカードは維持されます。よろしいですか？",
+        "次のゲームを準備します。番号とビンゴ判定を戻します。参加者のカード・景品の当選者・受け渡し待ちは引き継ぎます。よろしいですか？",
       )
     )
       void action({ action: "reset" });
@@ -532,11 +588,13 @@ function Host({
             index={index}
             busy={busy || !connected}
             action={action}
+            hostKey={hostKey}
+            onView={onView}
           />
         ))
       ) : (
         <p className="empty-state compact">
-          景品がある場合は、先に名前を登録しておけます。
+          景品を登録して、写真と一緒に会場で紹介しましょう。
         </p>
       )}
     </section>
@@ -587,6 +645,39 @@ function Host({
           {error}
         </p>
       )}
+      <section
+        className="stage-director"
+        aria-label="会場スクリーンの表示を選ぶ"
+      >
+        <div>
+          <span>スクリーン用の表示</span>
+          <strong>
+            {view.stage?.mode === "prize"
+              ? `景品紹介：${view.prizes.find((p) => p.id === view.stage?.prizeId)?.name || ""}`
+              : view.stage?.mode === "award"
+                ? `当選者紹介：${view.prizes.find((p) => p.id === view.stage?.prizeId)?.awardedName || ""}さん`
+                : view.stage?.mode === "history"
+                  ? "番号一覧"
+                  : lobby
+                    ? "参加受付"
+                    : "抽選・ビンゴの自動表示"}
+          </strong>
+        </div>
+        <button
+          className="button"
+          disabled={busy || !connected || !view.stage}
+          onClick={() => void action({ action: "stage", mode: "draw" })}
+        >
+          {lobby ? "参加QRへ" : "抽選画面へ"}
+        </button>
+        <button
+          className="button"
+          disabled={busy || !connected || !view.drawn.length}
+          onClick={() => void action({ action: "stage", mode: "history" })}
+        >
+          番号一覧を映す
+        </button>
+      </section>
       <div className="stats-grid">
         <div>
           <span>参加者</span>
@@ -761,6 +852,43 @@ function Host({
       <div className="host-management">
         {lobby && prizePanel}
         <div className="host-secondary">
+          <Community
+            view={view}
+            live={live}
+            host
+            connected={connected}
+            {...community}
+          />
+          <section className="panel crew-invite">
+            <h2>景品係に受け渡しを任せる</h2>
+            <p>
+              <b>{view.pendingPrizes || 0}個</b>
+              が受け渡し待ち。抽選を止めずに別の端末で確認できます。
+            </p>
+            <button
+              className="button"
+              disabled={busy || !connected}
+              onClick={async () => {
+                if (!view.crewKey) {
+                  await action({ action: "crew" });
+                  return;
+                }
+                copy(`${location.origin}/crew/${view.id}#key=${view.crewKey}`);
+              }}
+            >
+              景品係用リンクをコピー
+            </button>
+            {view.crewKey && (
+              <Link
+                href={`/crew/${view.id}#key=${view.crewKey}`}
+                target="_blank"
+                className="text-link"
+              >
+                景品係の画面を開く ↗
+              </Link>
+            )}
+            <small>このリンクでは抽選・景品の変更はできません。</small>
+          </section>
           <details className="participant-register" open={lobby}>
             <summary>
               参加者一覧 <span>{view.count}人</span>
@@ -840,7 +968,7 @@ function Host({
               参加済みカードを印刷
             </Link>
             <button disabled={busy || !connected} onClick={reset}>
-              リハーサル・次のゲームへ ↻
+              次のゲームへ ↻
             </button>
             <button
               className="danger-action"
@@ -935,37 +1063,79 @@ function PrizeRow({
   index,
   busy,
   action,
+  hostKey,
+  onView,
 }: {
   prize: Prize;
   view: RoomView;
   index: number;
+  hostKey: string;
+  onView: (view: RoomView) => void;
   busy: boolean;
   action: (input: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [selected, setSelected] = useState("");
-  const winner = view.winners.find((p) => p.id === prize.playerId);
+  const winner = prize.playerId
+    ? {
+        name:
+          prize.awardedName ||
+          view.winners.find((p) => p.id === prize.playerId)?.name ||
+          "当選者",
+        id: prize.playerId,
+      }
+    : undefined;
   const eligible = view.winners.filter(
     (p) => !view.prizes.some((other) => other.playerId === p.id),
   );
   return (
     <div className="prize-row">
-      <div>
+      <PrizePicture roomId={view.id} prize={prize} />
+      <div className="prize-row-info">
         <span className="prize-order">
           {String(index + 1).padStart(2, "0")}
         </span>
         <b>{prize.name}</b>
-        {winner && <span className="awarded">✓ {winner.name}</span>}
+        {winner && (
+          <span className="awarded">
+            ✓ {winner.name} ·{" "}
+            {prize.deliveredAt ? "受け渡し済み" : "受け渡し待ち"}
+          </span>
+        )}
+        {!winner && (
+          <PrizePhotoUpload
+            view={view}
+            prize={prize}
+            hostKey={hostKey}
+            disabled={busy}
+            onView={onView}
+          />
+        )}
+        {!winner && (
+          <button
+            className="prize-present"
+            disabled={busy}
+            onClick={() =>
+              void action({ action: "stage", mode: "prize", prizeId: prize.id })
+            }
+          >
+            この景品をスクリーンに紹介 ↗
+          </button>
+        )}
         {winner ? (
           <button
             className="text-link"
-            disabled={busy}
+            disabled={busy || !!prize.deliveredAt}
             onClick={() => {
               if (
                 confirm(
                   "景品の割り当てを取り消します。手渡し済みの場合は受け渡しも確認してください。",
                 )
               )
-                void action({ action: "unaward", prizeId: prize.id });
+                void action({
+                  action: "unaward",
+                  prizeId: prize.id,
+                  expectedAwardId: prize.awardId,
+                });
             }}
           >
             当選者を変更
@@ -1023,6 +1193,8 @@ function PrizeRow({
 
 function Participant({
   view,
+  live,
+  onLive,
   refresh,
   connected,
   playerKey,
@@ -1031,6 +1203,8 @@ function Participant({
   rememberKey,
 }: {
   view: RoomView;
+  live?: CommunityFeed;
+  onLive: (live: CommunityFeed) => void;
   refresh: () => void;
   connected: boolean;
   playerKey: string | null;
@@ -1041,10 +1215,12 @@ function Participant({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const community = useCommunity(view, null, playerKey, onLive);
   const me = view.me;
   const burst = useCelebration(
     view.gameNumber,
     me && cardStatus(me.card, view.drawn).bingo ? 1 : 0,
+    view.drawn.length,
   );
   if (!me)
     return (
@@ -1145,7 +1321,7 @@ function Participant({
   return (
     <main
       id="main-content"
-      className={`participant-main ${status.bingo ? "has-bingo" : ""}`}
+      className={`participant-main ${status.bingo ? "has-bingo" : status.reach ? "has-reach" : ""}`}
     >
       <Celebration burst={burst} />
       <div className="participant-greeting">
@@ -1214,11 +1390,42 @@ function Participant({
         )}
       </div>
       <BingoCard card={me.card} drawn={view.drawn} />
-      {prize ? (
+      <Reactions
+        view={view}
+        live={live}
+        send={community.send}
+        disabled={!connected || community.busy}
+      />
+      {community.error && (
+        <p className="error" role="alert">
+          {community.error}
+        </p>
+      )}
+      {view.receipts?.length ? (
+        view.receipts.map((receipt) => (
+          <div className="won-prize" key={receipt.id}>
+            <PrizePicture
+              roomId={view.id}
+              prize={{ name: receipt.prizeName, imageKey: receipt.imageKey }}
+            />
+            <span>第{receipt.gameNumber}ゲーム · あなたの景品</span>
+            <h2>{receipt.prizeName}</h2>
+            {receipt.deliveredAt ? (
+              <p>✓ 受け取り済み。おめでとう！</p>
+            ) : (
+              <>
+                <p>景品係に、この番号を見せてください。</p>
+                <strong className="claim-code">{receipt.claimCode}</strong>
+                <small>他の人に共有しないでください。</small>
+              </>
+            )}
+          </div>
+        ))
+      ) : prize ? (
         <div className="won-prize">
           <span>あなたの景品</span>
           <h2>{prize.name}</h2>
-          <p>幹事に名前を伝えて、景品を受け取ってください。</p>
+          <p>幹事の案内をお待ちください。</p>
         </div>
       ) : (
         <p className="participant-help">
@@ -1227,6 +1434,8 @@ function Participant({
             : "リーチもビンゴも自動判定。申告の操作は不要です。"}
         </p>
       )}
+      <PrizeGallery view={view} />
+      <Community view={view} live={live} connected={connected} {...community} />
       <details className="drawn-details">
         <summary>
           これまでに出た番号を見る <span>{view.drawn.length}個</span>
@@ -1248,184 +1457,6 @@ function Participant({
             このカードの復帰リンクをコピー
           </button>
         </details>
-      )}
-    </main>
-  );
-}
-
-function Screen({
-  view,
-  joinUrl,
-  connected,
-}: {
-  view: RoomView;
-  joinUrl: string;
-  connected: boolean;
-}) {
-  const [canFullscreen, setCanFullscreen] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
-  const burst = useCelebration(view.gameNumber, view.winners.length);
-  useEffect(() => {
-    setCanFullscreen(Boolean(document.fullscreenEnabled));
-    const changed = () => setFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener("fullscreenchange", changed);
-    return () => document.removeEventListener("fullscreenchange", changed);
-  }, []);
-  const newest = view.winners.filter(
-    (player) => player.bingoAt === view.drawn.length,
-  );
-  const shown = newest.length ? newest.slice(0, 6) : view.winners.slice(-6);
-  const lobby = view.status === "lobby";
-  return (
-    <main
-      id="main-content"
-      className={`screen-main ${lobby ? "screen-lobby" : ""}`}
-    >
-      <Celebration burst={burst} />
-      <header className="screen-title">
-        <div>
-          <span className="screen-brand" aria-hidden="true">
-            BINGO ROOM
-          </span>
-          <h1>{view.title}</h1>
-        </div>
-        <div className="screen-controls">
-          <Connection connected={connected} />
-          {!lobby && (
-            <details className="screen-return">
-              <summary>カードに戻る</summary>
-              <div>
-                <QrCode url={joinUrl} />
-                <b>{view.id}</b>
-                <p>参加したときと同じブラウザで開いてください。</p>
-              </div>
-            </details>
-          )}
-          {canFullscreen && (
-            <button
-              className="screen-fullscreen"
-              onClick={() => {
-                const task = document.fullscreenElement
-                  ? document.exitFullscreen()
-                  : document.documentElement.requestFullscreen();
-                task.catch(() =>
-                  window.alert(
-                    "全画面に切り替えられませんでした。ブラウザの全画面機能をお使いください。",
-                  ),
-                );
-              }}
-            >
-              {fullscreen ? "全画面を終了" : "全画面表示"}
-            </button>
-          )}
-        </div>
-      </header>
-      {lobby ? (
-        <div className="screen-waiting">
-          <div className="screen-welcome">
-            <div className="welcome-letters" aria-hidden="true">
-              {"BINGO".split("").map((letter) => (
-                <b key={letter}>{letter}</b>
-              ))}
-            </div>
-            <h2>
-              まずは、カードを
-              <br />
-              受け取ってください。
-            </h2>
-            <p>QRを読み取って、ニックネームを入力。</p>
-            <p className="screen-count">
-              <strong>{view.count}</strong>人が参加済み
-            </p>
-            <span>みんながそろったら、スタート！</span>
-          </div>
-          <aside className="screen-join">
-            <span className="screen-join-heading">スマホでQRを読み取る</span>
-            <QrCode url={joinUrl} />
-            <span className="screen-code-caption">参加コード</span>
-            <b>{view.id}</b>
-            <span>
-              コードの入力先
-              <br />
-              <b className="screen-address">{joinUrl.split("/join/")[0]}</b>
-            </span>
-          </aside>
-        </div>
-      ) : (
-        <>
-          <div className="screen-stage">
-            <section className="screen-draw">
-              <span className="screen-call-label">
-                {view.status === "finished"
-                  ? "ゲーム終了"
-                  : `第${view.drawn.length}回の番号`}
-              </span>
-              <DrawBall number={view.drawn.at(-1)} />
-              <div className="screen-recent">
-                {view.drawn.length > 1 && <span>ひとつ前</span>}
-                {view.drawn
-                  .slice(-5, -1)
-                  .reverse()
-                  .map((number) => (
-                    <b key={number}>{number}</b>
-                  ))}
-              </div>
-            </section>
-            <div className="screen-board">
-              <div>
-                <h2>これまでに出た番号</h2>
-                <span>{view.drawn.length} / 75</span>
-              </div>
-              <NumberBoard drawn={view.drawn} />
-            </div>
-          </div>
-          <section
-            className={`screen-winners ${newest.length ? "has-new-winners" : ""}`}
-            aria-label="直近の当選者"
-          >
-            <div className="screen-winners-title">
-              <span aria-hidden="true">
-                {view.winners.length ? "BINGO!" : "BINGO"}
-              </span>
-              <h2>
-                {newest.length
-                  ? `この番号で ${newest.length}人がビンゴ`
-                  : shown.length
-                    ? "直近のビンゴ"
-                    : "次のビンゴは、だれ？"}
-              </h2>
-              <b>合計 {view.winners.length}人</b>
-            </div>
-            {shown.length ? (
-              <div className="screen-winner-names">
-                {shown.map((player) => (
-                  <p key={player.id}>
-                    <b>
-                      <em>{player.rank}位</em>
-                      {player.name}
-                    </b>
-                    <span>
-                      {
-                        view.prizes.find(
-                          (prize) => prize.playerId === player.id,
-                        )?.name
-                      }
-                    </span>
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <p className="screen-winners-empty">
-                縦・横・斜めの1列でビンゴ。カードは自動で開きます。
-              </p>
-            )}
-            {newest.length > 6 && (
-              <p className="screen-winners-more">
-                ほか{newest.length - 6}人。同じ抽選回でのビンゴは同順位です。
-              </p>
-            )}
-          </section>
-        </>
       )}
     </main>
   );

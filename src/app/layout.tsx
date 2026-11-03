@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import "./venue.css";
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: {

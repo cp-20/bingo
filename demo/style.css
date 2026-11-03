@@ -76,3 +76,13 @@
 :fullscreen .demo-bar {
   display: none;
 }
+@media (min-width: 851px) {
+  .demo-bar + .role-screen .venue {
+    height: calc(100dvh - 65px);
+    min-height: calc(100dvh - 65px);
+  }
+  :fullscreen .demo-bar + .role-screen .venue {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+}

@@ -7,7 +7,7 @@ import { AppError } from "./errors";
 
 let client: Client | undefined;
 let initialized: Promise<void> | undefined;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function databaseConfigured() {
   if (process.env.NODE_ENV !== "production") return true;
@@ -144,7 +144,38 @@ export async function migrate(store: Client) {
         args: [Date.now()],
       });
     }
+    if (current < 3) {
+      await tx.executeMultiple(`
+        ALTER TABLE rooms ADD COLUMN stage TEXT NOT NULL DEFAULT 'null';
+        ALTER TABLE rooms ADD COLUMN featured_prize_id TEXT;
+        ALTER TABLE rooms ADD COLUMN crew_hash TEXT;
+        CREATE TABLE room_live (room_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, chat_enabled INTEGER NOT NULL DEFAULT 1, pinned_id TEXT);
+        INSERT INTO room_live(room_id) SELECT id FROM rooms;
+        CREATE TABLE messages (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, sender_id TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, is_host INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+        CREATE INDEX messages_room ON messages(room_id,created_at);
+        CREATE INDEX messages_sender ON messages(room_id,sender_id,created_at);
+        CREATE TABLE reactions (room_id TEXT NOT NULL, game_number INTEGER NOT NULL, draw_count INTEGER NOT NULL, player_id TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(room_id,game_number,draw_count,player_id));
+        CREATE TABLE prize_images (room_id TEXT NOT NULL, image_key TEXT NOT NULL, data_base64 TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(room_id,image_key));
+        CREATE TABLE awards (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, prize_id TEXT NOT NULL, player_id TEXT NOT NULL, player_name TEXT NOT NULL, prize_name TEXT NOT NULL, image_key TEXT, game_number INTEGER NOT NULL, claim_code TEXT NOT NULL, delivered_at INTEGER, cancelled_at INTEGER);
+        CREATE INDEX awards_room ON awards(room_id,cancelled_at);
+        INSERT INTO schema_migrations(version,applied_at) VALUES(3,unixepoch()*1000);
+      `);
+      await upgradeLegacyAwards(tx);
+    }
   });
+}
+
+// Preserve physical prize allocations when upgrading or restoring a v2 event.
+export async function upgradeLegacyAwards(tx: Transaction) {
+  await tx.executeMultiple(`
+    INSERT OR IGNORE INTO awards(id,room_id,prize_id,player_id,player_name,prize_name,game_number,claim_code)
+      SELECT 'legacy-'||r.id||'-'||json_extract(p.value,'$.id'),r.id,json_extract(p.value,'$.id'),players.id,players.name,json_extract(p.value,'$.name'),r.game_number,printf('%06d',100000+abs(random()%900000))
+      FROM rooms r,json_each(r.prizes) p JOIN players ON players.id=json_extract(p.value,'$.playerId') AND players.room_id=r.id
+      WHERE json_extract(p.value,'$.playerId') IS NOT NULL AND json_extract(p.value,'$.awardId') IS NULL;
+    UPDATE rooms SET prizes=(SELECT json_group_array(json(CASE WHEN a.id IS NULL THEN p.value ELSE json_set(p.value,'$.awardId',a.id,'$.awardedName',a.player_name,'$.awardedGame',a.game_number,'$.deliveredAt',a.delivered_at) END))
+      FROM json_each(rooms.prizes) p LEFT JOIN awards a ON a.room_id=rooms.id AND a.prize_id=json_extract(p.value,'$.id') AND a.cancelled_at IS NULL)
+      WHERE EXISTS (SELECT 1 FROM awards WHERE room_id=rooms.id AND id LIKE 'legacy-%');
+  `);
 }
 
 export async function db() {
@@ -186,19 +217,35 @@ export async function writeTransaction<T>(fn: (tx: Transaction) => Promise<T>) {
   const store = await db();
   if (writing) {
     if (writeWaiters.length >= 128)
-      throw new AppError("操作が混み合っています。少し待って再度お試しください。", 503, "WRITE_QUEUE_FULL", 2);
+      throw new AppError(
+        "操作が混み合っています。少し待って再度お試しください。",
+        503,
+        "WRITE_QUEUE_FULL",
+        2,
+      );
     await new Promise<void>((resolve, reject) => {
-      const ready = () => { clearTimeout(timer); resolve(); };
+      const ready = () => {
+        clearTimeout(timer);
+        resolve();
+      };
       const timer = setTimeout(() => {
         const index = writeWaiters.indexOf(ready);
         if (index >= 0) writeWaiters.splice(index, 1);
-        reject(new AppError("操作の待ち時間が長くなっています。最新の状態を確認して再度お試しください。", 503, "WRITE_QUEUE_TIMEOUT", 2));
+        reject(
+          new AppError(
+            "操作の待ち時間が長くなっています。最新の状態を確認して再度お試しください。",
+            503,
+            "WRITE_QUEUE_TIMEOUT",
+            2,
+          ),
+        );
       }, 8000);
       writeWaiters.push(ready);
     });
   } else writing = true;
-  try { return await transaction(store, fn); }
-  finally {
+  try {
+    return await transaction(store, fn);
+  } finally {
     const next = writeWaiters.shift();
     if (next) next();
     else writing = false;
