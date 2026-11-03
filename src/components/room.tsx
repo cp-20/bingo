@@ -751,13 +751,13 @@ function Screen({view,joinUrl}:{view:RoomView;joinUrl:string}) {
   const newest=view.winners.filter(player=>player.bingoAt===view.drawn.length);
   const shown=newest.length?newest.slice(0,6):view.winners.slice(-6);
   return <main id="main-content" className={"screen-main"+(view.status==="lobby"?" screen-lobby":"")}>
-    <div className="screen-title"><h1>{view.title}</h1>{canFullscreen&&<button className="screen-fullscreen" onClick={()=>{const task=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();task.catch(()=>{});}}>{fullscreen?"全画面を終了":"全画面表示"}</button>}</div>
+    <div className="screen-title"><h1>{view.title}</h1><div className="screen-controls">{view.status!=="lobby"&&<details className="screen-return"><summary>カードに戻る</summary><div><QrCode url={joinUrl}/><b>{view.id}</b><p>参加したときと同じブラウザで開いてください。</p></div></details>}{canFullscreen&&<button className="screen-fullscreen" onClick={()=>{const task=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();task.catch(()=>{});}}>{fullscreen?"全画面を終了":"全画面表示"}</button>}</div></div>
     {view.status==="lobby"?<div className="screen-waiting"><div><h2>QRからカードを受け取ってください。</h2><p>ニックネームを入力すると参加できます。</p><p className="screen-count"><strong>{view.count}</strong>人が参加済み</p><p>全員がそろったら、幹事が抽選を始めます。</p></div><aside className="screen-join"><QrCode url={joinUrl}/><b>{view.id}</b><span>QR、または参加コードで参加</span></aside></div>:<>
-      <section className="screen-draw"><span>{view.status==="finished"?"ゲーム終了":"いま出た番号 · 第"+view.drawn.length+"回"}</span><strong key={view.drawn.length} aria-live="polite">{view.drawn.at(-1)||"—"}</strong><div className="screen-recent">{view.drawn.length>1&&<span>ひとつ前</span>}{view.drawn.slice(-6,-1).reverse().map(number=><b key={number}>{number}</b>)}</div></section>
-      <NumberBoard drawn={view.drawn}/>
+      <div className="screen-stage"><section className="screen-draw"><span>{view.status==="finished"?"ゲーム終了":"いま出た番号 · 第"+view.drawn.length+"回"}</span><strong key={view.drawn.length} aria-live="polite">{view.drawn.at(-1)||"—"}</strong><div className="screen-recent">{view.drawn.length>1&&<span>ひとつ前</span>}{view.drawn.slice(-6,-1).reverse().map(number=><b key={number}>{number}</b>)}</div></section>
+      <NumberBoard drawn={view.drawn}/></div>
       <div className="screen-score"><span>抽選済み {view.drawn.length} / 75</span><span>ビンゴ {view.winners.length}人</span><span>新規参加の受付は終了しています</span></div>
       {shown.length>0&&<section className="screen-winners" aria-label="直近の当選者"><h2>{newest.length?"この番号で "+newest.length+"人がビンゴ":"直近のビンゴ"}</h2><div>{shown.map(player=><p key={player.id}><b>{player.rank}位 {player.name}</b><span>{view.prizes.find(prize=>prize.playerId===player.id)?.name}</span></p>)}</div>{newest.length>6&&<p>ほか{newest.length-6}人。同じ抽選回でのビンゴは同順位です。</p>}</section>}
-      <details className="screen-return"><summary>参加済みカードへ戻る</summary><QrCode url={joinUrl}/><b>{view.id}</b><p>参加したときと同じブラウザで開いてください。</p></details>
+
     </>}
   </main>;
 }

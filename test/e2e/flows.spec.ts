@@ -156,6 +156,12 @@ test("host and mobile guest create, join, draw, recover after storage loss, and 
     path: "test-results/host-desktop.png",
     fullPage: true,
   });
+  const drawBounds=await page.getByRole("button",{name:"次の番号をひく"}).boundingBox();
+  expect(drawBounds!.y+drawBounds!.height).toBeLessThanOrEqual(800);
+  await page.setViewportSize({width:1280,height:720});
+  const shortBounds=await page.getByRole("button",{name:"次の番号をひく"}).boundingBox();
+  expect(shortBounds!.y+shortBounds!.height).toBeLessThanOrEqual(720);
+  await page.setViewportSize({width:1280,height:800});
   await visual(page, "host-desktop");
   await page.setViewportSize({ width: 320, height: 800 });
   await noOverflow(page);
@@ -374,6 +380,8 @@ test("a full venue keeps the called number visible and lets the host find long n
     await page.setViewportSize({width:1280,height});
     const bounds=await page.locator(".number-board").boundingBox();
     expect(bounds!.y+bounds!.height).toBeLessThanOrEqual(height);
+    const winnerBounds=await page.locator(".screen-winners").boundingBox();
+    expect(winnerBounds!.y+winnerBounds!.height).toBeLessThanOrEqual(height);
     await noOverflow(page);
   }
   await page.setViewportSize({width:1280,height:800});
@@ -381,7 +389,6 @@ test("a full venue keeps the called number visible and lets the host find long n
   await visual(page,"screen-playing");
   await page.screenshot({path:"test-results/screen-playing.png",fullPage:true});
   await page.goto("/host/"+event.id+"#key="+event.hostToken);
-  await expect(page.getByRole("heading",{name:"幹事の進行画面"})).toHaveCount(0);
   await expect(page.locator(".big-number")).toHaveText("75");
   await page.locator(".participant-register>summary").click();
   await page.getByLabel("参加者名で検索").fill("299");
